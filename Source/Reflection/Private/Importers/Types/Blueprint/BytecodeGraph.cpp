@@ -26,6 +26,9 @@
 #include "Components/ActorComponent.h"
 #include "Containers/ExportContainer.h"
 #include "Serializers/ObjectSerializer.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Importers/Constructor/Asset.h"
 #include "Importers/Constructor/ImportIssues.h"
 #include "Utilities/AssetPaths.h"
@@ -4435,6 +4438,69 @@ void FBytecodeGraph::FindConstants() {
 		bool& Holds = Plain.FindOrAdd(Name, true);
 
 		Holds = Holds && (bSaidOutright || bCopied);
+
+		/* Which values it was said to hold, for telling a value handed on from a flag kept */
+		if (bSaidOutright && Statement.JsonObject.IsValid()) {
+			FString Spelled;
+
+			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Spelled);
+
+			if (const TSharedPtr<FJsonObject>* Said = nullptr; Statement.JsonObject->TryGetObjectField(TEXT("Expression"), Said) && Said != nullptr) {
+				FJsonSerializer::Serialize(Said->ToSharedRef(), Writer);
+			}
+
+			SaidValues.FindOrAdd(Name).Add(Spelled);
+		}
+	}
+
+	/* A flag, rather than a value handed on.
+	 *
+	 * Said outright every time it is written, but not always the same thing, and read before the
+	 * first place it is written. A loop with a break is the shape of it: the flag is read where the
+	 * loop asks whether to go on, cleared where it starts and set where it breaks, and all three can
+	 * sit anywhere in the ubergraph. Carried as whatever was said last, every read gets one of the
+	 * values and the loop never breaks, or never runs. It is a Local the macro kept, and it is
+	 * kept as one here. */
+	{
+		TMap<FString, int32> FirstWrite;
+		TMap<FString, int32> FirstRead;
+
+		for (int32 Index = 0; Index < Statements.Num(); ++Index) {
+			const FUObjectJsonValueExport& Statement = Statements[Index];
+
+			if (!Statement.JsonObject.IsValid()) continue;
+
+			const bool bLet = MacroReading::IsLet(MacroReading::TokenOf(Statement));
+			const FString Written = bLet ? MacroReading::WrittenTo(Statement) : FString();
+
+			if (!Written.IsEmpty() && !FirstWrite.Contains(Written)) FirstWrite.Add(Written, Index);
+
+			TArray<FString> Reads;
+
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Statement.JsonObject->Values) {
+				if (bLet && Field.Key == TEXT("Variable")) continue;
+
+				NamesRead(Field.Value, Reads);
+			}
+
+			for (const FString& Read : Reads) {
+				if (!FirstRead.Contains(Read)) FirstRead.Add(Read, Index);
+			}
+		}
+
+		for (const TPair<FString, TSet<FString>>& Said : SaidValues) {
+			if (Said.Value.Num() < 2 || !Plain.FindRef(Said.Key)) continue;
+
+			const int32* Read = FirstRead.Find(Said.Key);
+			const int32* Wrote = FirstWrite.Find(Said.Key);
+
+			if (Read != nullptr && Wrote != nullptr && *Read < *Wrote) {
+				HeldScratch.Add(Said.Key);
+
+				UE_LOG(LogReflectionBytecode, Display, TEXT("\"%s\" is said to hold %d different values and read before any of them, so it is kept as the Local it was"),
+					*Said.Key, Said.Value.Num());
+			}
+		}
 	}
 
 	/* Which of them the run tests, which makes them something kept rather than a value passed on */
@@ -4492,6 +4558,9 @@ void FBytecodeGraph::FindConstants() {
 		 * it. Where nothing is, each read carries whatever the write before it put there, which is
 		 * how the run reads it and how it is laid out. */
 		if (!Wrote.Value) continue;
+
+		/* A flag, which is kept rather than carried */
+		if (HeldScratch.Contains(Wrote.Key)) continue;
 
 		/* Unless it is worked out from itself, however many steps round. */
 		bool bItself = false;
@@ -5415,6 +5484,7 @@ int32 FBytecodeGraph::Build() {
 		/* Through every copy of a copy, to whatever was worked out in the first place */
 		FString Name = One.Wanted;
 		UEdGraphPin* Held = nullptr;
+		TOptional<FString> Literal;
 		TSet<FString> Followed;
 
 		while (!Name.IsEmpty() && !Followed.Contains(Name)) {
@@ -5426,9 +5496,22 @@ int32 FBytecodeGraph::Build() {
 				break;
 			}
 
+			/* Or a value said outright further down the list, which the pin holds itself */
+			if (const FString* Carries = Carried.Find(Name)) {
+				Literal = *Carries;
+
+				break;
+			}
+
 			const FString* Next = Aliases.Find(Name);
 
 			Name = Next != nullptr ? *Next : FString();
+		}
+
+		if (Literal.IsSet()) {
+			ApplyLiteral(Pin, Literal.GetValue());
+
+			continue;
 		}
 
 		if (Held == nullptr) {
@@ -5444,6 +5527,35 @@ int32 FBytecodeGraph::Build() {
 		}
 
 		Connect(Held, Pin);
+	}
+
+	/* A call made on something else that ended up made on nothing.
+	 *
+	 * The compiler only says the target has to be connected, and names neither the node nor the
+	 * statement. Said here, while which call it was is still known, and before anything that runs
+	 * after the graph is read can be blamed for it. */
+	for (UEdGraphNode* Laid : Graph->Nodes) {
+		const UK2Node_CallFunction* Call = ::Cast<UK2Node_CallFunction>(Laid);
+
+		if (Call == nullptr || Call->FunctionReference.IsSelfContext()) continue;
+
+		const UEdGraphPin* Self = Call->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input);
+
+		if (Self == nullptr || Self->bHidden || Self->LinkedTo.Num() > 0) continue;
+
+		const UClass* On = Call->FunctionReference.GetMemberParentClass();
+		const UBlueprint* Own = Graph->GetTypedOuter<UBlueprint>();
+
+		/* Static, or on something the blueprint already is, where an empty target is fine */
+		if (On == nullptr || (Own != nullptr && Own->GeneratedClass != nullptr && Own->GeneratedClass->IsChildOf(On->GetAuthoritativeClass()))) continue;
+
+		if (const UFunction* Function = Call->GetTargetFunction(); Function != nullptr && Function->HasAnyFunctionFlags(FUNC_Static)) continue;
+
+		UE_LOG(LogReflectionBytecode, Warning, TEXT("\"%s\" calls %s.%s with nothing to call it on"),
+			*Call->GetName(), *On->GetName(), *Call->FunctionReference.GetMemberName().ToString());
+
+		Unhandled.AddUnique(FString::Printf(TEXT("%s calls %s.%s with nothing to call it on"),
+			*Call->GetName(), *On->GetName(), *Call->FunctionReference.GetMemberName().ToString()));
 	}
 
 	for (const TPair<UEdGraphPin*, int32>& Jump : Jumps) {
