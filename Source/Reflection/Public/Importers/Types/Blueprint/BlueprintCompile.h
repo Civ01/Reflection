@@ -30,4 +30,8 @@ struct REFLECTION_API FBlueprintSettle {
 
 	/* Remembered by every guarded compile, so nothing has to say it */
 	static void Track(UBlueprint* Blueprint);
+
+	/* Asks for a blueprint to be read again once the run is over, because something it calls was not
+	 * there yet when its graphs were laid out */
+	static void Reread(UBlueprint* Blueprint);
 };

@@ -33,6 +33,7 @@
 #include "UObject/CoreRedirects.h"
 #include "Importers/Types/Blueprint/BlueprintGraphs.h"
 #include "Importers/Types/Blueprint/BlueprintVariables.h"
+#include "Importers/Types/Blueprint/BlueprintCompile.h"
 #include "K2Node_CommutativeAssociativeBinaryOperator.h"
 #include "K2Node_CallMaterialParameterCollectionFunction.h"
 #include "K2Node_CallDataTableFunction.h"
@@ -1256,7 +1257,15 @@ const UClass* FBytecodeGraph::ClassNamedBy(const FUObjectJsonValueExport& Expres
 
 	/* A default object is named after the class it is the default of, so taking the prefix off
 	 * leaves the class */
-	return FindClassByType(Called.RightChop(FCString::Strlen(DEFAULT_OBJECT_PREFIX)));
+	const FString Class = Called.RightChop(FCString::Strlen(DEFAULT_OBJECT_PREFIX));
+
+	if (const UClass* Found = FindClassByType(Class)) return Found;
+
+	/* A function library, most often, which nothing else in reading this one goes looking for: the
+	 * call is the only thing that names it. Fetched the way a cast fetches what it casts to. */
+	BringInClass(Named);
+
+	return FindClassByType(Class);
 }
 
 void FBytecodeGraph::BringInClass(const FUObjectJsonValueExport& Named) {
@@ -2502,6 +2511,17 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 			*Expression.GetString(TEXT("Token")),
 			Names.IsEmpty() ? TEXT("a function it does not name") : *Names));
 
+		/* Not had yet, rather than not had at all, where what declares it is a blueprint. Its
+		 * functions are only made as it is laid out, which can be well after the first thing that
+		 * calls one: everything nested under a character is read before the character's library
+		 * is. A call named by a bare name is on a blueprint, and one named by reference says where
+		 * its class lives; only the engine's and the game's own code never come later. */
+		const FString Lives = Expression.JsonObject.IsValid() && Expression.JsonObject->HasTypedField<EJson::String>(TEXT("Function"))
+			? FString()
+			: Expression.GetObject(TEXT("Function")).GetString(TEXT("ObjectPath"));
+
+		if (!Lives.StartsWith(TEXT("/Script/"))) bWorthRereading = true;
+
 		return nullptr;
 	}
 
@@ -2622,6 +2642,24 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 	}
 
 	Node->SetFromFunction(Function);
+
+	/* Made on something else, which a call on the blueprint itself would not take.
+	 *
+	 * A function the blueprint inherits is laid out as its own, with a target that only takes the
+	 * blueprint: a component calling one of its parent's functions on another component of that
+	 * parent class is drawn as calling it on itself. The wire to the other one is refused, and
+	 * what gets put between them is a cast to this blueprint, which can never work. Said as the
+	 * class that declares it, the target takes anything of that class. */
+	if (Target != nullptr && Node->FunctionReference.IsSelfContext() && Node->GetClass() == UK2Node_CallFunction::StaticClass()) {
+		const UBlueprint* Own = Graph != nullptr ? Graph->GetTypedOuter<UBlueprint>() : nullptr;
+		const UClass* Mine = Own != nullptr ? Own->GeneratedClass : nullptr;
+		const UClass* Given = Cast<UClass>(Target->PinType.PinSubCategoryObject.Get());
+
+		if (Mine != nullptr && Given != nullptr && !Given->IsChildOf(Mine) && Function->GetOwnerClass() != nullptr) {
+			Node->FunctionReference.SetExternalMember(Function->GetFName(), Function->GetOwnerClass()->GetAuthoritativeClass());
+		}
+	}
+
 	Node->AllocateDefaultPins();
 
 	/* The component node works out what it hands back from the template it is pointed at, and it is
@@ -2974,7 +3012,17 @@ void FBytecodeGraph::Connect(UEdGraphPin* From, UEdGraphPin* To) {
 	}
 
 	/* A pin the schema keeps for itself, which nothing in the graph is meant to reach */
-	Unhandled.AddUnique(FString::Printf(TEXT("link %s -> %s"), *From->PinName.ToString(), *To->PinName.ToString()));
+	/* Said with what each side holds, since which two pins it was says nothing about why */
+	const auto Holds = [](const UEdGraphPin* Pin) {
+		const UObject* Of = Pin->PinType.PinSubCategoryObject.Get();
+
+		return FString::Printf(TEXT("%s%s%s"), *Pin->PinType.PinCategory.ToString(),
+			Of != nullptr ? TEXT(" ") : TEXT(""), Of != nullptr ? *Of->GetName() : TEXT(""));
+	};
+
+	Unhandled.AddUnique(FString::Printf(TEXT("link %s.%s (%s) -> %s.%s (%s)"),
+		*From->GetOwningNode()->GetName(), *From->PinName.ToString(), *Holds(From),
+		*To->GetOwningNode()->GetName(), *To->PinName.ToString(), *Holds(To)));
 }
 
 void FBytecodeGraph::LinkExecution(UEdGraphPin* From, UEdGraphPin* To) {
@@ -5362,6 +5410,11 @@ int32 FBytecodeGraph::Build() {
 
 	if (Unhandled.Num() > 0) {
 		UE_LOG(LogReflectionBytecode, Warning, TEXT("\"%s\" placed %d node(s), and read nothing from: %s"), *Graph->GetName(), Placed, *FString::Join(Unhandled, TEXT(", ")));
+
+		/* Read again once the run is over, when whatever it called has been laid out too */
+		if (bWorthRereading) {
+			FBlueprintSettle::Reread(Graph->GetTypedOuter<UBlueprint>());
+		}
 
 		/* Said where somebody will see it and not only in the log. A graph that came back with
 		 * something missing still opens and still compiles, and what it does then is not what the
