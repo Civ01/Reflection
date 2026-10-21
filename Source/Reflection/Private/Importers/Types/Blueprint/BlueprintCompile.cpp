@@ -13,6 +13,11 @@
 #include "Engine/Package.h"
 #include "Settings/SettingsAccess.h"
 #include "Engine/Log.h"
+#include "BlueprintCompilationManager.h"
+#include "K2Node_BaseMCDelegate.h"
+#include "EdGraphSchema_K2.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "UObject/UObjectIterator.h"
 
 namespace {
 	/* Where the slow tasks were before, and what to drop back to afterwards.
@@ -136,6 +141,92 @@ namespace {
 
 	/* Settling compiles through the same guard, which would only put each one back on the list */
 	bool bSettleRunning = false;
+
+	/* Compiles everything queued in one go, with the same guard a single compile has */
+	bool AttemptFlush() {
+#if PLATFORM_WINDOWS && !PLATFORM_SEH_EXCEPTIONS_DISABLED
+		__try {
+			FBlueprintCompilationManager::FlushCompilationQueueAndReinstance();
+
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+#else
+		FBlueprintCompilationManager::FlushCompilationQueueAndReinstance();
+
+		return true;
+#endif
+	}
+
+	/* Whether a class is the one that stands for its blueprint now, rather than a copy the compiler
+	 * keeps on the side or one an earlier compile left behind */
+	bool IsCurrentClass(const UClass* Class) {
+		if (Class == nullptr || Class->HasAnyClassFlags(CLASS_NewerVersionExists)) return false;
+		if (Class->GetOutermost() == GetTransientPackage()) return false;
+
+		const FString Named = Class->GetName();
+
+		return !Named.StartsWith(TEXT("SKEL_")) && !Named.StartsWith(TEXT("REINST_")) && !Named.StartsWith(TEXT("TRASHCLASS_"));
+	}
+
+	/* Points a bind, unbind or call at the class that really declares the dispatcher it names.
+	 *
+	 * A dispatcher on another blueprint is often not there yet when the node is laid out, because
+	 * that blueprint is still being made further up the import: the node is left asking for it on
+	 * its own blueprint, which has no dispatcher of that name. By the end of the run the other one
+	 * has it. What the node is asked against says which class that is, and where it is wired to
+	 * nothing, a dispatcher only one blueprint declares can only be that one. */
+	int32 RepointDelegates(UBlueprint* Blueprint) {
+		TArray<UK2Node_BaseMCDelegate*> Nodes;
+		FBlueprintEditorUtils::GetAllNodesOfClass(Blueprint, Nodes);
+
+		int32 Repointed = 0;
+
+		for (UK2Node_BaseMCDelegate* Node : Nodes) {
+			if (Node == nullptr || Node->GetProperty() != nullptr) continue;
+
+			const FName Called = Node->GetPropertyName();
+
+			if (Called.IsNone()) continue;
+
+			UClass* Owner = nullptr;
+
+			if (const UEdGraphPin* Target = Node->FindPin(UEdGraphSchema_K2::PN_Self); Target != nullptr && Target->LinkedTo.Num() > 0 && Target->LinkedTo[0] != nullptr) {
+				UClass* Wired = Cast<UClass>(Target->LinkedTo[0]->PinType.PinSubCategoryObject.Get());
+
+				if (Wired != nullptr && FindFProperty<FMulticastDelegateProperty>(Wired, Called) != nullptr) Owner = Wired;
+			}
+
+			if (Owner == nullptr) {
+				TSet<UClass*> Declaring;
+
+				for (TObjectIterator<UBlueprintGeneratedClass> It; It; ++It) {
+					if (!IsCurrentClass(*It)) continue;
+
+					/* Declared there rather than inherited, or every child of the owner would count too */
+					if (const FMulticastDelegateProperty* Found = FindFProperty<FMulticastDelegateProperty>(*It, Called); Found != nullptr && Found->GetOwnerClass() == *It) {
+						Declaring.Add(*It);
+					}
+				}
+
+				if (Declaring.Num() == 1) Owner = *Declaring.CreateConstIterator();
+			}
+
+			if (Owner == nullptr) continue;
+
+			/* One the blueprint has itself is asked of itself */
+			if (Blueprint->GeneratedClass != nullptr && Blueprint->GeneratedClass->IsChildOf(Owner)) continue;
+
+			Node->Modify();
+			Node->DelegateReference.SetExternalMember(Called, Owner);
+
+			Repointed++;
+		}
+
+		return Repointed;
+	}
 }
 
 void FBlueprintSettle::Begin() {
@@ -178,24 +269,45 @@ int32 FBlueprintSettle::Settle() {
 
 		if (Failing.Num() == 0) break;
 
-		int32 Came = 0;
+		TMap<UBlueprint*, EBlueprintStatus> Was;
+		int32 Repointed = 0;
 
 		for (UBlueprint* Blueprint : Failing) {
-			const EBlueprintStatus Was = Blueprint->Status;
+			Was.Add(Blueprint, Blueprint->Status);
+
+			Repointed += RepointDelegates(Blueprint);
 
 			/* Reconstructed the way loading one does, so a node pointing at something that was not
 			 * there when it was laid out picks up what is there now */
 			FBlueprintEditorUtils::RefreshAllNodes(Blueprint);
+		}
 
-			if (!CompileBlueprintGuarded(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection)) continue;
+		/* All of them together, the way loading compiles what it brought in. One at a time, each compile
+		 * makes its class over again, and the next blueprint still holds members of the class it replaced:
+		 * the compiler reads one of those as a property whose owner is gone, and stops the editor. */
+		for (UBlueprint* Blueprint : Failing) {
+			FBlueprintCompilationManager::QueueForCompilation(Blueprint);
+		}
 
+		if (!AttemptFlush()) {
+			UE_LOG(LogReflection, Error, TEXT("Settling pass %d: compiling %d blueprint(s) together failed, and nothing more was tried"), Pass + 1, Failing.Num());
+
+			break;
+		}
+
+		int32 Came = 0;
+
+		for (UBlueprint* Blueprint : Failing) {
 			Recompiled.Add(Blueprint);
 
 			/* Better counts, errors down to warnings included, since that can be what the next one waits on */
-			if (Blueprint->Status == BS_UpToDate || (Was == BS_Error && Blueprint->Status == BS_UpToDateWithWarnings)) Came++;
+			const EBlueprintStatus Before = Was.FindRef(Blueprint);
+
+			if (Blueprint->Status == BS_UpToDate || (Before == BS_Error && Blueprint->Status == BS_UpToDateWithWarnings)) Came++;
 		}
 
-		UE_LOG(LogReflection, Display, TEXT("Settling pass %d: %d of %d blueprint(s) left with errors or warnings improved"), Pass + 1, Came, Failing.Num());
+		UE_LOG(LogReflection, Display, TEXT("Settling pass %d: %d dispatcher reference(s) repointed, %d of %d blueprint(s) left with errors or warnings improved"),
+			Pass + 1, Repointed, Came, Failing.Num());
 
 		Settled += Came;
 

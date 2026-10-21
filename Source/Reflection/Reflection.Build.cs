@@ -204,6 +204,9 @@ public class Reflection : ModuleRules {
 			/* UEdGraphSchema_K2, whose PC_* pin categories name the type of a blueprint variable */
 			"BlueprintGraph",
 
+			/* FBlueprintCompilationManager, which compiles several blueprints together the way loading them does */
+			"Kismet",
+
 			/* AInstancedFoliageActor and what it plants */
 			"Foliage",
 
