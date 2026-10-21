@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Containers/JsonValueExport.h"
 #include "Importers/Types/Blueprint/MacroPattern.h"
+#include "EdGraph/EdGraphPin.h"
 
 class UEdGraph;
 class UK2Node_FunctionResult;
@@ -319,8 +320,23 @@ private:
 	int32 AnsweredAt = INDEX_NONE;
 	TWeakObjectPtr<UK2Node_FunctionResult> AnsweredWith;
 
-	/* Pins waiting on a local that a call further down the list hands out */
-	TArray<TPair<UEdGraphPin*, FString>> Later;
+	/* A pin waiting on a local that a call further down the list hands out.
+	 *
+	 * Held as the node, the pin's name and which way it faces rather than as the pin. Anything that
+	 * lays the node out again between now and the end of the run throws its pins away and makes new
+	 * ones, and a pin held from before that is one nothing will ever read. */
+	struct FWaiting {
+		TWeakObjectPtr<UEdGraphNode> Node;
+		FName Pin;
+		EEdGraphPinDirection Direction = EGPD_Input;
+		FString Wanted;
+	};
+
+	TArray<FWaiting> Later;
+
+	/* A local written from another that was not worked out yet when it was written, against the
+	 * name it was written from. Whatever waits on the one is waiting on the other. */
+	TMap<FString, FString> Aliases;
 
 	/* The name a value is read under, against the event that hands it over */
 	TMap<FString, TPair<TWeakObjectPtr<UK2Node>, FString>> Handed;

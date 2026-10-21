@@ -3057,7 +3057,14 @@ void FBytecodeGraph::Give(const FValue& What, UEdGraphPin* To) {
 	} else if (!What.Literal.IsEmpty()) {
 		ApplyLiteral(To, What.Literal);
 	} else if (!What.Wanted.IsEmpty()) {
-		Later.Add(TPair<UEdGraphPin*, FString>(To, What.Wanted));
+		FWaiting Waiting;
+
+		Waiting.Node = To->GetOwningNodeUnchecked();
+		Waiting.Pin = To->PinName;
+		Waiting.Direction = To->Direction;
+		Waiting.Wanted = What.Wanted;
+
+		Later.Add(Waiting);
 	}
 }
 
@@ -3117,7 +3124,14 @@ void FBytecodeGraph::Connect(UEdGraphPin* From, UEdGraphPin* To) {
 	/* Two classes neither of which is the other. A cast between them can never succeed, so putting
 	 * one in only trades a refused wire for a node that fails every time it runs. */
 	const UClass* Given = Cast<UClass>(From->PinType.PinSubCategoryObject.Get());
-	const bool bUnrelated = Target != nullptr && Given != nullptr && !Given->IsChildOf(Target) && !Target->IsChildOf(Given);
+
+	/* Asked of the classes the blueprints compile to. A pin typed from the skeleton the editor
+	 * keeps, or from the class a recompile left behind, is the same class under another object, and
+	 * neither is a child of the other. */
+	const UClass* GivenAs = Given != nullptr ? Given->GetAuthoritativeClass() : nullptr;
+	const UClass* TargetAs = Target != nullptr ? Target->GetAuthoritativeClass() : nullptr;
+
+	const bool bUnrelated = TargetAs != nullptr && GivenAs != nullptr && !GivenAs->IsChildOf(TargetAs) && !TargetAs->IsChildOf(GivenAs);
 
 	/* Handed to a call as what it is made on, where the call is not the thing's to make.
 	 *
@@ -3506,6 +3520,11 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 		if (!Name.IsEmpty() && (IsMade(Name))) {
 			if (Expression.Pin != nullptr) {
 				Locals.Add(Name, Expression.Pin);
+			} else if (!Expression.Wanted.IsEmpty() && Expression.Wanted != Name) {
+				/* Copied out of something worked out further down the list. There is no pin to
+				 * hold yet, so whoever reads this one is pointed at that one instead, and is wired
+				 * to it once it is laid down. */
+				Aliases.Add(Name, Expression.Wanted);
 			} else if (Constants.Contains(Name) && !Expression.Literal.IsEmpty()) {
 				/* Stretch as what it says rather than laid down as a node. Whoever reads it is a pin
 				 * that was given this value, and a pin holds its own value. */
@@ -5376,12 +5395,55 @@ int32 FBytecodeGraph::Build() {
 
 	/* Tied up at the end, since a jump can name an address that had not been laid down yet */
 	/* And the arguments worked out by a call written further down the list */
-	for (const TPair<UEdGraphPin*, FString>& One : Later) {
-		if (One.Key == nullptr || One.Key->LinkedTo.Num() > 0) continue;
+	for (const FWaiting& One : Later) {
+		UEdGraphNode* Owner = One.Node.Get();
 
-		if (UEdGraphPin** Held = Locals.Find(One.Value); Held != nullptr && *Held != nullptr) {
-			Connect(*Held, One.Key);
+		/* Taken out of the graph since, by a pass that found it did nothing */
+		if (Owner == nullptr || !Graph->Nodes.Contains(Owner)) continue;
+
+		UEdGraphPin* Pin = Owner->FindPin(One.Pin, One.Direction);
+
+		if (Pin == nullptr) {
+			Unhandled.AddUnique(FString::Printf(TEXT("%s.%s waits for \"%s\", and the node no longer has that pin"),
+				*Owner->GetName(), *One.Pin.ToString(), *One.Wanted));
+
+			continue;
 		}
+
+		if (Pin->LinkedTo.Num() > 0) continue;
+
+		/* Through every copy of a copy, to whatever was worked out in the first place */
+		FString Name = One.Wanted;
+		UEdGraphPin* Held = nullptr;
+		TSet<FString> Followed;
+
+		while (!Name.IsEmpty() && !Followed.Contains(Name)) {
+			Followed.Add(Name);
+
+			if (UEdGraphPin** Known = Locals.Find(Name); Known != nullptr && *Known != nullptr) {
+				Held = *Known;
+
+				break;
+			}
+
+			const FString* Next = Aliases.Find(Name);
+
+			Name = Next != nullptr ? *Next : FString();
+		}
+
+		if (Held == nullptr) {
+			/* Said, rather than left to the compiler to say as a pin with nothing wired to it,
+			 * which names neither the node nor the value it was waiting for */
+			UE_LOG(LogReflectionBytecode, Warning, TEXT("%s.%s waits for \"%s\", which nothing laid down hands out"),
+				*Owner->GetName(), *One.Pin.ToString(), *One.Wanted);
+
+			Unhandled.AddUnique(FString::Printf(TEXT("%s.%s waits for \"%s\", which nothing laid down hands out"),
+				*Owner->GetName(), *One.Pin.ToString(), *One.Wanted));
+
+			continue;
+		}
+
+		Connect(Held, Pin);
 	}
 
 	for (const TPair<UEdGraphPin*, int32>& Jump : Jumps) {
