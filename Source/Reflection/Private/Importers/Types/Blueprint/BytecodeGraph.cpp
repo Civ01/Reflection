@@ -4471,9 +4471,9 @@ void FBytecodeGraph::FindConstants() {
 			if (!Statement.JsonObject.IsValid()) continue;
 
 			const bool bLet = MacroReading::IsLet(MacroReading::TokenOf(Statement));
-			const FString Written = bLet ? MacroReading::WrittenTo(Statement) : FString();
+			const FString Assigned = bLet ? MacroReading::WrittenTo(Statement) : FString();
 
-			if (!Written.IsEmpty() && !FirstWrite.Contains(Written)) FirstWrite.Add(Written, Index);
+			if (!Assigned.IsEmpty() && !FirstWrite.Contains(Assigned)) FirstWrite.Add(Assigned, Index);
 
 			TArray<FString> Reads;
 
