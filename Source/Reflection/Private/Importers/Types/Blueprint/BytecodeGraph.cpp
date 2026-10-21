@@ -998,6 +998,19 @@ UEdGraphPin* FBytecodeGraph::PointAtDelegate(UK2Node_BaseMCDelegate* Node, const
 				}
 
 				Owner = FindClassByType(Spelled);
+
+				/* Looked for by name only finds a class something has already brought in. A dispatcher on
+				 * another blueprint, the player's say, is one nothing has: missed here it is asked for on
+				 * this blueprint instead, and every bind to it fails to compile along with the event it
+				 * would have run. The reference says where that blueprint lives, so it is brought in from
+				 * there, the same way a parent or a variable's type is. */
+				const TSharedPtr<FJsonObject> Resolved = Points.GetObject(TEXT("ResolvedOwner")).JsonObject;
+				FString Path;
+
+				if (Owner == nullptr && Resolved.IsValid() && Resolved->HasTypedField<EJson::String>(TEXT("ObjectName"))
+					&& Resolved->TryGetStringField(TEXT("ObjectPath"), Path) && !Path.IsEmpty() && !Path.Contains(TEXT("/Script/"))) {
+					Owner = LoadClass(Resolved);
+				}
 			}
 
 			/* Said inside the reference instead, which is where the owner goes when nothing
