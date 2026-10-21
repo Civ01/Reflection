@@ -207,7 +207,7 @@ private:
 	bool HasLocal(const FString& Name) const;
 
 	/* Points a delegate node at the delegate it is about, and answers what it is asked against */
-	UEdGraphPin* PointAtDelegate(class UK2Node_BaseMCDelegate* Node, const FUObjectJsonValueExport& Named);
+	FValue PointAtDelegate(class UK2Node_BaseMCDelegate* Node, const FUObjectJsonValueExport& Named);
 
 	/* The pin a function answers through, by the name of the answer. Nothing where the function
 	 * gives nothing back, or where the name is not one of its answers. */
