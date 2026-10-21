@@ -972,8 +972,8 @@ namespace {
 	}
 }
 
-UEdGraphPin* FBytecodeGraph::PointAtDelegate(UK2Node_BaseMCDelegate* Node, const FUObjectJsonValueExport& Named) {
-	if (Node == nullptr) return nullptr;
+FBytecodeGraph::FValue FBytecodeGraph::PointAtDelegate(UK2Node_BaseMCDelegate* Node, const FUObjectJsonValueExport& Named) {
+	if (Node == nullptr) return FValue();
 
 	/* Stretch by something else, which the run says by reaching it through that thing. What is named
 	 * is the delegate; what it is reached through is the target the node is asked against. */
@@ -1058,7 +1058,9 @@ UEdGraphPin* FBytecodeGraph::PointAtDelegate(UK2Node_BaseMCDelegate* Node, const
 			else Node->DelegateReference.SetSelfMember(FName(*Called));
 		}
 
-		return On.Pin;
+		/* All of it rather than the pin alone: what the delegate is reached through can be worked
+		 * out further down the list, and is only a name until then */
+		return On;
 	}
 
 	/* One of the blueprint's own, which is asked of itself */
@@ -1068,7 +1070,7 @@ UEdGraphPin* FBytecodeGraph::PointAtDelegate(UK2Node_BaseMCDelegate* Node, const
 		}
 	}
 
-	return nullptr;
+	return FValue();
 }
 
 UEdGraphPin* FBytecodeGraph::FindAnswer(const FString& Name) const {
@@ -3853,18 +3855,19 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 			? static_cast<UK2Node_BaseMCDelegate*>(AddNode<UK2Node_AddDelegate>())
 			: static_cast<UK2Node_BaseMCDelegate*>(AddNode<UK2Node_RemoveDelegate>());
 
-		UEdGraphPin* Against = PointAtDelegate(Node, Statement.GetObject(TEXT("MulticastDelegate")));
+		const FValue Against = PointAtDelegate(Node, Statement.GetObject(TEXT("MulticastDelegate")));
 
 		Node->AllocateDefaultPins();
 
-		if (Against != nullptr && Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input) != nullptr) {
-			Connect(Against, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
+		/* Given rather than connected, so a target worked out further down the list is still wired */
+		if (UEdGraphPin* MadeOn = Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input)) {
+			Give(Against, MadeOn);
 		}
 
 		if (Statement.Has(TEXT("Delegate"))) {
 			const FValue Bound = Read(Statement.GetObject(TEXT("Delegate")));
 
-			if (Bound.Pin != nullptr && Node->GetDelegatePin() != nullptr) Connect(Bound.Pin, Node->GetDelegatePin());
+			if (UEdGraphPin* Takes = Node->GetDelegatePin()) Give(Bound, Takes);
 		}
 
 		ChainExecution(Node);
@@ -3889,12 +3892,13 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 			}
 		}
 
-		UEdGraphPin* Against = PointAtDelegate(Node, Cleared);
+		const FValue Against = PointAtDelegate(Node, Cleared);
 
 		Node->AllocateDefaultPins();
 
-		if (Against != nullptr && Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input) != nullptr) {
-			Connect(Against, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
+		/* Given rather than connected, so a target worked out further down the list is still wired */
+		if (UEdGraphPin* MadeOn = Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input)) {
+			Give(Against, MadeOn);
 		}
 
 		ChainExecution(Node);
@@ -3908,12 +3912,13 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 	if (Token == TEXT("EX_CallMulticastDelegate")) {
 		UK2Node_CallDelegate* Node = AddNode<UK2Node_CallDelegate>();
 
-		UEdGraphPin* Against = PointAtDelegate(Node, Statement.GetObject(TEXT("Delegate")));
+		const FValue Against = PointAtDelegate(Node, Statement.GetObject(TEXT("Delegate")));
 
 		Node->AllocateDefaultPins();
 
-		if (Against != nullptr && Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input) != nullptr) {
-			Connect(Against, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
+		/* Given rather than connected, so a target worked out further down the list is still wired */
+		if (UEdGraphPin* MadeOn = Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input)) {
+			Give(Against, MadeOn);
 		}
 
 		/* What it hands each of them, in the order the signature takes them */
@@ -5535,6 +5540,24 @@ int32 FBytecodeGraph::Build() {
 	 * statement. Said here, while which call it was is still known, and before anything that runs
 	 * after the graph is read can be blamed for it. */
 	for (UEdGraphNode* Laid : Graph->Nodes) {
+		/* A bind, unbind or call of another class's dispatcher, which needs what it is on just the same */
+		if (const UK2Node_BaseMCDelegate* Binding = ::Cast<UK2Node_BaseMCDelegate>(Laid); Binding != nullptr && !Binding->DelegateReference.IsSelfContext()) {
+			const UEdGraphPin* Self = Binding->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input);
+			const UClass* On = Binding->DelegateReference.GetMemberParentClass();
+			const UBlueprint* Own = Graph->GetTypedOuter<UBlueprint>();
+
+			if (Self != nullptr && !Self->bHidden && Self->LinkedTo.Num() == 0 && On != nullptr
+				&& !(Own != nullptr && Own->GeneratedClass != nullptr && Own->GeneratedClass->IsChildOf(On->GetAuthoritativeClass()))) {
+				UE_LOG(LogReflectionBytecode, Warning, TEXT("\"%s\" reaches %s.%s with nothing to reach it through"),
+					*Binding->GetName(), *On->GetName(), *Binding->DelegateReference.GetMemberName().ToString());
+
+				Unhandled.AddUnique(FString::Printf(TEXT("%s reaches %s.%s with nothing to reach it through"),
+					*Binding->GetName(), *On->GetName(), *Binding->DelegateReference.GetMemberName().ToString()));
+			}
+
+			continue;
+		}
+
 		const UK2Node_CallFunction* Call = ::Cast<UK2Node_CallFunction>(Laid);
 
 		if (Call == nullptr || Call->FunctionReference.IsSelfContext()) continue;
