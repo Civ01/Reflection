@@ -1314,6 +1314,45 @@ bool IAnimationBlueprintImporter::Expose(UAnimGraphNode_Base* Node, const FName 
 	return ExposeNamed(Node, FName(*Named.Left(Last)));
 }
 
+UEdGraphPin* IAnimationBlueprintImporter::PinAnswering(const FString& Owner, const FName Member) {
+	if (UEdGraphPin* Said = IBlueprintImporter::PinAnswering(Owner, Member)) return Said;
+
+	/* Found among every graph's nodes, since a state keeps its own apart from the graph around it */
+	UAnimGraphNode_Base* Node = nullptr;
+
+	for (FUObjectExportContainer* Held : AnimNodeContainers) {
+		if (Held == nullptr) continue;
+
+		const FUObjectExport* Export = Held->Find(Owner);
+
+		if (Export->IsJsonAndObjectValid()) {
+			Node = Cast<UAnimGraphNode_Base>(Export->Object);
+
+			if (Node != nullptr) break;
+		}
+	}
+
+	if (Node == nullptr) return nullptr;
+
+	UEdGraphPin* Pin = Node->FindPin(Member, EGPD_Input);
+
+	/* An input worked out rather than typed in is one the node keeps hidden until something feeds
+	 * it. A blend space chosen as the character moves is the standing example: hidden, the node has
+	 * no blend space at all, and the compiler says it points at one nobody has heard of. */
+	if (Pin == nullptr && Expose(Node, Member)) {
+		Node->ReconstructNode();
+
+		Pin = Node->FindPin(Member, EGPD_Input);
+	}
+
+	/* A pose is drawn from node to node, and was never worked out anywhere */
+	if (Pin == nullptr || UAnimationGraphSchema::IsPosePin(Pin->PinType)) return nullptr;
+
+	Answers(Owner, Member, Pin);
+
+	return Pin;
+}
+
 void IAnimationBlueprintImporter::AnswerThrough(FUObjectExportContainer* Container) {
 	if (Container == nullptr) return;
 

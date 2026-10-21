@@ -30,6 +30,11 @@ public:
 	 * written is wired to the pin instead. */
 	void Answers(const FString& Owner, FName Member, UEdGraphPin* Pin);
 
+	/* The pin a write into one of a node's members answers, where there is one. What was said
+	 * through Answers, and anything a kind of blueprint can make on the spot: an animation node keeps
+	 * most of its inputs hidden until something feeds them. */
+	virtual UEdGraphPin* PinAnswering(const FString& Owner, FName Member);
+
 protected:
 	/* Recreates the variables the blueprint declares, returns how many were added.
 	 * Not const, reading the export off the container isn't. */

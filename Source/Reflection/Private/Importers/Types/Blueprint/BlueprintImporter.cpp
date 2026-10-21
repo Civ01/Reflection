@@ -1031,6 +1031,14 @@ namespace {
 	}
 }
 
+UEdGraphPin* IBlueprintImporter::PinAnswering(const FString& Owner, const FName Member) {
+	for (const FDecided& Says : Decides) {
+		if (Says.Owner == Owner && Says.Member == Member) return Says.Pin;
+	}
+
+	return nullptr;
+}
+
 void IBlueprintImporter::Answers(const FString& Owner, const FName Member, UEdGraphPin* Pin) {
 	if (Owner.IsEmpty() || Pin == nullptr) return;
 
@@ -1059,6 +1067,9 @@ int32 IBlueprintImporter::ConstructGraphs() {
 
 	/* Where in the ubergraph each stretch that is a graph of its own begins */
 	TArray<int32> Handlers;
+
+	/* Which function each of those addresses was entered from */
+	TMap<int32, FString> HandlerFunction;
 
 	/* The ubergraph as it was read, since those stretches are laid out from it a second time */
 	TArray<FUObjectJsonValueExport> Ubergraphed;
@@ -1123,6 +1134,7 @@ int32 IBlueprintImporter::ConstructGraphs() {
 					if (Parameter.GetString(TEXT("Token")) != TEXT("EX_IntConst")) continue;
 
 					Handlers.AddUnique(Parameter.GetInteger(TEXT("Value"), INDEX_NONE));
+					HandlerFunction.Add(Parameter.GetInteger(TEXT("Value"), INDEX_NONE), Name);
 				}
 			}
 
@@ -1311,7 +1323,23 @@ int32 IBlueprintImporter::ConstructGraphs() {
 
 	UE_LOG(LogReflection, Display, TEXT("%d stretch(es) of the ubergraph are entered by a handler, and %d node member(s) are answered through a pin"), Handlers.Num(), Decides.Num());
 
-	if (Ubergraph.IsValid() && Handlers.Num() > 0 && Decides.Num() > 0) {
+	/* Which node each handler was made for. An animation blueprint keeps, for every node with an
+	 * input worked out in the ubergraph, the function it is bound to; nothing else carries these. */
+	TMap<FString, FString> OwnerOfHandler;
+
+	if (FUObjectExport* Defaults = GetClassDefaultObject(GetContainer(), GetAssetDataAsValue()); Defaults != nullptr && Defaults->IsJsonValid()) {
+		if (const TSharedPtr<FJsonObject>* Sparse; Defaults->JsonObject->TryGetObjectField(TEXT("SerializedSparseClassData"), Sparse)) {
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : (*Sparse)->Values) {
+				const TSharedPtr<FJsonObject> Held = Field.Value.IsValid() && Field.Value->Type == EJson::Object ? Field.Value->AsObject() : nullptr;
+
+				if (FString Bound; Held.IsValid() && Held->TryGetStringField(TEXT("BoundFunction"), Bound) && !Bound.IsEmpty() && Bound != TEXT("None")) {
+					OwnerOfHandler.Add(Bound, Field.Key);
+				}
+			}
+		}
+	}
+
+	if (Ubergraph.IsValid() && Handlers.Num() > 0) {
 		/* Where in what was read each statement sits, by the address it was written at */
 		TMap<int32, int32> Sits;
 
@@ -1360,9 +1388,17 @@ int32 IBlueprintImporter::ConstructGraphs() {
 			 * everything to the end of the ubergraph so every graph it is laid into gets almost
 			 * the whole blueprint, and everything it is left out of loses it. Better to leave a
 			 * stretch where it was written than to take the wrong half of the graph with it. */
+			/* Which node the handler was made for, where the class says so. Matched against that node
+			 * alone, a stretch cannot be laid into another node's graph because it happens to write
+			 * something of that node's first, and it can answer several of its own node's inputs at
+			 * once, which is how the compiler writes a node with more than one of them worked out. */
+			const FString* HandlerName = HandlerFunction.Find(Entered);
+			const FString* Owns = HandlerName != nullptr ? OwnerOfHandler.Find(*HandlerName) : nullptr;
+
 			int32 To = INDEX_NONE;
 
-			const FDecided* Into = nullptr;
+			TArray<TPair<FName, UEdGraphPin*>> Answered;
+			FString AnsweredOwner;
 
 			for (int32 Index = At; Index < Ubergraphed.Num(); ++Index) {
 				const FUObjectJsonValueExport& One = Ubergraphed[Index];
@@ -1384,28 +1420,34 @@ int32 IBlueprintImporter::ConstructGraphs() {
 
 					ReadStructMemberContext(Variable, Owner, Member);
 
-					for (const FDecided& Says : Decides) {
-						if (Says.Owner == Owner && Says.Member == FName(*Member)) {
-							Into = &Says;
+					/* Another node's, which ends what this handler is answerable for */
+					if (Owns != nullptr && Owner != *Owns) break;
 
-							/* The write is the end of it, and nothing past it was worked out here */
-							To = One.GetInteger(TEXT("StatementIndex"), INDEX_NONE);
+					UEdGraphPin* Pin = PinAnswering(Owner, FName(*Member));
 
-							break;
-						}
+					if (Pin != nullptr) {
+						Answered.Add(TPair<FName, UEdGraphPin*>(FName(*Member), Pin));
+						AnsweredOwner = Owner;
+
+						To = One.GetInteger(TEXT("StatementIndex"), INDEX_NONE);
 					}
-				}
 
-				if (Into != nullptr) break;
+					/* Without a node to hold it to, the first answer is all it can be trusted with */
+					if (Owns == nullptr && Answered.Num() > 0) break;
+
+					continue;
+				}
 
 				if (Token == TEXT("EX_Return") || Token == TEXT("EX_EndOfScript")) break;
 			}
 
-			if (To == INDEX_NONE || To < From) continue;
+			if (To == INDEX_NONE || To < From || Answered.Num() == 0) continue;
 
-			if (Into == nullptr || Into->Pin == nullptr || Into->Pin->GetOwningNode() == nullptr) continue;
+			UEdGraphPin* First = Answered[0].Value;
 
-			UEdGraph* Rule = Into->Pin->GetOwningNode()->GetGraph();
+			if (First == nullptr || First->GetOwningNode() == nullptr) continue;
+
+			UEdGraph* Rule = First->GetOwningNode()->GetGraph();
 
 			if (Rule == nullptr) continue;
 
@@ -1419,7 +1461,10 @@ int32 IBlueprintImporter::ConstructGraphs() {
 			Made->SetObjectSerializer(GetObjectSerializer());
 
 			Made->Only(From, To);
-			Made->HandsInto(Into->Owner, Into->Member, Into->Pin);
+
+			for (const TPair<FName, UEdGraphPin*>& One : Answered) {
+				Made->HandsInto(AnsweredOwner, One.Key, One.Value);
+			}
 
 			/* And out of the events, where it was never written, along with the jumps that led to it */
 			Ubergraph->LeaveOut(From, To);
@@ -1428,8 +1473,8 @@ int32 IBlueprintImporter::ConstructGraphs() {
 
 			Rules.Add(Made);
 
-			UE_LOG(LogReflection, Display, TEXT("%d..%d decides '%s.%s', so it is laid out in '%s' rather than among the events"),
-				From, To, *Into->Owner, *Into->Member.ToString(), *Rule->GetName());
+			UE_LOG(LogReflection, Display, TEXT("%d..%d decides %d input(s) of '%s' (first '%s'), so it is laid out in '%s' rather than among the events"),
+				From, To, Answered.Num(), *AnsweredOwner, *Answered[0].Key.ToString(), *Rule->GetName());
 		}
 	}
 
