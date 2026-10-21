@@ -1035,6 +1035,22 @@ UEdGraphPin* FBytecodeGraph::PointAtDelegate(UK2Node_BaseMCDelegate* Node, const
 				}
 			}
 
+			/* Or beside the property, the way a newer Cloud writes every member it points at:
+			 * { Owner, Property } rather than one reference naming both */
+			if (Owner == nullptr && Points.Has(TEXT("Owner"))) {
+				FString Spelled, Unused;
+				SplitReference(Points.GetObject(TEXT("Owner")), Spelled, Unused);
+
+				Owner = Spelled.IsEmpty() ? nullptr : FindClassByType(Spelled);
+
+				/* A blueprint's class is only here once something has asked for it */
+				if (Owner == nullptr && !Spelled.IsEmpty()) {
+					BringInClass(Points.GetObject(TEXT("Owner")));
+
+					Owner = FindClassByType(Spelled);
+				}
+			}
+
 			if (Owner != nullptr) Node->DelegateReference.SetExternalMember(DispatcherOn(Owner, Called), Owner);
 			else Node->DelegateReference.SetSelfMember(FName(*Called));
 		}
