@@ -2173,7 +2173,7 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 						UE_LOG(LogReflectionBytecode, Display, TEXT("\"%s\" is not on %s yet, so it was read as the script describes it"), *Name, *On->GetName());
 					}
 
-					if (On->IsA<UBlueprintGeneratedClass>()) bWorthRereading = true;
+					if (::Cast<UBlueprintGeneratedClass>(On) != nullptr) bWorthRereading = true;
 				}
 
 				Connect(Target.Pin, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
