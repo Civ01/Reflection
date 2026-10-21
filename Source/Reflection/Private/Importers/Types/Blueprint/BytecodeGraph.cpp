@@ -3073,6 +3073,47 @@ void FBytecodeGraph::Connect(UEdGraphPin* From, UEdGraphPin* To) {
 		}
 	}
 
+	/* Two classes neither of which is the other. A cast between them can never succeed, so putting
+	 * one in only trades a refused wire for a node that fails every time it runs. */
+	const UClass* Given = Cast<UClass>(From->PinType.PinSubCategoryObject.Get());
+	const bool bUnrelated = Target != nullptr && Given != nullptr && !Given->IsChildOf(Target) && !Target->IsChildOf(Given);
+
+	/* Handed to a call as what it is made on, where the call is not the thing's to make.
+	 *
+	 * The bytecode only says a function's name and what it is called on, so which class the name was
+	 * looked up on is worked out here, and that can come out as the wrong one: a call on what a
+	 * library call or a loop handed out has been laid out as one of the blueprint's own. The value
+	 * says what it really is, so where that class has a function of the same name the call is
+	 * pointed there instead. Nothing has been wired to it yet beyond this, so laying it out again
+	 * loses nothing. */
+	if (bUnrelated && To->PinName == UEdGraphSchema_K2::PN_Self && To->Direction == EGPD_Input) {
+		if (UK2Node_CallFunction* Call = ::Cast<UK2Node_CallFunction>(To->GetOwningNode()); Call != nullptr && Call->GetClass() == UK2Node_CallFunction::StaticClass()) {
+			const FName Called = Call->FunctionReference.GetMemberName();
+
+			if (const UFunction* There = FindFunctionOn(Given, Called.ToString()); There != nullptr && There->GetOwnerClass() != nullptr) {
+				UE_LOG(LogReflectionBytecode, Display, TEXT("\"%s\" was laid out against %s and is made on a %s, so it was pointed there"),
+					*Called.ToString(), *Target->GetName(), *Given->GetName());
+
+				Call->FunctionReference.SetExternalMember(There->GetFName(), There->GetOwnerClass()->GetAuthoritativeClass());
+				Call->ReconstructNode();
+
+				if (UEdGraphPin* Self = Call->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input); Self != nullptr && Schema->TryCreateConnection(From, Self)) return;
+			}
+
+			Unhandled.AddUnique(FString::Printf(TEXT("%s made on a %s, laid out against %s"), *Called.ToString(), *Given->GetName(), *Target->GetName()));
+
+			return;
+		}
+	}
+
+	if (bUnrelated) {
+		Unhandled.AddUnique(FString::Printf(TEXT("link %s.%s (%s) -> %s.%s (%s), which no cast could make"),
+			*From->GetOwningNode()->GetName(), *From->PinName.ToString(), *Given->GetName(),
+			*To->GetOwningNode()->GetName(), *To->PinName.ToString(), *Target->GetName()));
+
+		return;
+	}
+
 	if (Target != nullptr && From->PinType.PinCategory == UEdGraphSchema_K2::PC_Object && To->PinType.PinCategory == UEdGraphSchema_K2::PC_Object) {
 		UK2Node_DynamicCast* Node = AddNode<UK2Node_DynamicCast>();
 
