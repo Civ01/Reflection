@@ -127,6 +127,9 @@ private:
 	/* The class a reference stands for, where it names a class's default object rather than an asset */
 	const UClass* ClassNamedBy(const FUObjectJsonValueExport& Expression);
 
+	/* The class a variable read says it holds, from the property the script names */
+	const UClass* ClassDeclaredBy(const FUObjectJsonValueExport& Expression);
+
 	/* Fetches the asset a class was written in, where a call names one the project hasn't got */
 	void BringInClass(const FUObjectJsonValueExport& Named);
 
