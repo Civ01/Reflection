@@ -1896,8 +1896,17 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 		 * that has no type yet. An array made of constants has nothing wired to it at all, so every
 		 * one of its values went that way and the node came back with the right number of pins and
 		 * nothing in any of them. The script says what it is, in the property it is stored into. */
-		if (const FUObjectJsonValueExport Stored = Expression.GetObject(TEXT("AssigningProperty")).GetObject(TEXT("Variable")); Stored.Has(TEXT("Inner"))) {
+		/* The property is written into the variable, or beside its owner as { Owner, Property } */
+		FUObjectJsonValueExport Stored = Expression.GetObject(TEXT("AssigningProperty")).GetObject(TEXT("Variable"));
+
+		if (!Stored.Has(TEXT("Inner")) && Stored.Has(TEXT("Property"))) Stored = Stored.GetObject(TEXT("Property"));
+
+		bool bTyped = false;
+
+		if (Stored.Has(TEXT("Inner"))) {
 			if (FEdGraphPinType Element; TypeOfProperty(DescribedBy(Stored, TEXT("Inner"), Container), Element, Container)) {
+				bTyped = true;
+
 				/* Told outright rather than worked out. What the node does about being told is to
 				 * look through itself for a pin that already carries something, and until the
 				 * values are in there is nothing for it to find. */
@@ -1929,8 +1938,12 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 			else if (!Held.Literal.IsEmpty()) ApplyLiteral(Into[Which], Held.Literal);
 		}
 
-		/* What it hands back settles the kind of array it is, once something has been put in it */
-		Node->PostReconstructNode();
+		/* What it hands back settles the kind of array it is, once something has been put in it.
+		 *
+		 * Only where the script did not say. Asked to settle itself, the node takes the type of the
+		 * first thing wired in: an array of components that starts with one particular component
+		 * becomes an array of that, and every other element it was given no longer fits. */
+		if (!bTyped) Node->PostReconstructNode();
 
 		Placed++;
 
@@ -2180,6 +2193,18 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 
 			if (UK2Node* Node = PlaceCall(Inner, Target.Pin, Against)) {
 				Value.Pin = HandsBack(Node);
+
+				/* Made on something worked out further on, which is only a name until then.
+				 *
+				 * Events are laid out in the order they run rather than the order they sit in the
+				 * ubergraph, so what a call is made on can be written by a stretch that has not been
+				 * read yet. The read hands back the name it will be, and the target is promised it
+				 * the way any other pin is, rather than left with nothing. */
+				if (Target.Pin == nullptr && !Target.Wanted.IsEmpty()) {
+					if (UEdGraphPin* Self = Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input)) {
+						Give(Target, Self);
+					}
+				}
 			}
 
 			return Value;
