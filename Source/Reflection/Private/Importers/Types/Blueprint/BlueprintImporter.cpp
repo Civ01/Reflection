@@ -406,6 +406,11 @@ int32 IBlueprintImporter::ConstructVariables() {
 
 		if (Property.IsValid() && Property->TryGetStringField(TEXT("Name"), Name) && Components.Contains(Name)) continue;
 
+		/* A dispatcher is carried among the properties too, but it is no variable: the graphs pass makes it
+		 * from its signature. Offered here it has no pin type and is only reported as one that was dropped. */
+		if (FString Type; Property.IsValid() && Property->TryGetStringField(TEXT("Type"), Type)
+			&& Type.StartsWith(TEXT("Multicast")) && Type.EndsWith(TEXT("DelegateProperty"))) continue;
+
 		Declared.Add(Value);
 	}
 
@@ -933,6 +938,15 @@ void IBlueprintImporter::ConstructWidgetTree() {
 			}
 
 			WidgetBlueprint->Animations.Add(WidgetAnimation);
+
+#if ENGINE_UE5
+			/* An animation is a variable of the widget, and every variable the widget compiler meets has to be
+			 * known by a guid. The editor hands one out as the animation is added; added here, nothing does,
+			 * and each compile stops on an ensure saying so. */
+			if (!WidgetBlueprint->WidgetVariableNameToGuidMap.Contains(WidgetAnimation->GetFName())) {
+				WidgetBlueprint->WidgetVariableNameToGuidMap.Add(WidgetAnimation->GetFName(), FGuid::NewGuid());
+			}
+#endif
 
 			for (int32 Index = 0; Index < WidgetAnimation->MovieScene->GetPossessableCount(); ++Index) {
 				FMovieScenePossessable& Possessable = WidgetAnimation->MovieScene->GetPossessable(Index);

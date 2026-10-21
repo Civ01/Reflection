@@ -9,6 +9,10 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/FeedbackContext.h"
 #include "Misc/SlowTask.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Engine/Package.h"
+#include "Settings/SettingsAccess.h"
+#include "Engine/Log.h"
 
 namespace {
 	/* Where the slow tasks were before, and what to drop back to afterwards.
@@ -78,6 +82,8 @@ bool CompileBlueprintGuarded(UBlueprint* Blueprint, const EBlueprintCompileOptio
 	const int32 Depth = SlowTasks();
 
 	if (Attempt(Blueprint, Options)) {
+		FBlueprintSettle::Track(Blueprint);
+
 		return true;
 	}
 
@@ -123,4 +129,82 @@ UBlueprint* CreateBlueprintGuarded(UClass* ParentClass, UObject* Outer, const FN
 	);
 
 	return nullptr;
+}
+
+namespace {
+	TArray<TWeakObjectPtr<UBlueprint>> GSettleTracked;
+
+	/* Settling compiles through the same guard, which would only put each one back on the list */
+	bool bSettleRunning = false;
+}
+
+void FBlueprintSettle::Begin() {
+	GSettleTracked.Reset();
+}
+
+void FBlueprintSettle::Track(UBlueprint* Blueprint) {
+	if (Blueprint == nullptr || bSettleRunning) return;
+
+	GSettleTracked.AddUnique(Blueprint);
+}
+
+int32 FBlueprintSettle::Settle() {
+	if (bSettleRunning) return 0;
+
+	TArray<TWeakObjectPtr<UBlueprint>> Tracked = MoveTemp(GSettleTracked);
+	GSettleTracked.Reset();
+
+	TGuardValue<bool> Guard(bSettleRunning, true);
+
+	TSet<UBlueprint*> Recompiled;
+	int32 Settled = 0;
+
+	/* A blueprint coming good can be what the next one was waiting on, so it goes round again while
+	 * anything changes. Bounded, since one that will never compile would otherwise keep it going. */
+	for (int32 Pass = 0; Pass < 4; ++Pass) {
+		TArray<UBlueprint*> Failing;
+
+		for (const TWeakObjectPtr<UBlueprint>& Weak : Tracked) {
+			UBlueprint* Blueprint = Weak.Get();
+
+			/* One whose compile threw was kept off disk on purpose, and is left that way */
+			if (Blueprint == nullptr || Blueprint->GetOutermost()->HasAnyFlags(RF_Transient)) continue;
+			if (Blueprint->Status != BS_Error) continue;
+
+			Failing.Add(Blueprint);
+		}
+
+		if (Failing.Num() == 0) break;
+
+		int32 Came = 0;
+
+		for (UBlueprint* Blueprint : Failing) {
+			/* Reconstructed the way loading one does, so a node pointing at something that was not
+			 * there when it was laid out picks up what is there now */
+			FBlueprintEditorUtils::RefreshAllNodes(Blueprint);
+
+			if (!CompileBlueprintGuarded(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection)) continue;
+
+			Recompiled.Add(Blueprint);
+
+			if (Blueprint->Status != BS_Error) Came++;
+		}
+
+		UE_LOG(LogReflection, Display, TEXT("Settling pass %d: %d of %d blueprint(s) left in error now compile"), Pass + 1, Came, Failing.Num());
+
+		Settled += Came;
+
+		if (Came == 0) break;
+	}
+
+	/* Written again where the run writes what it makes, otherwise left for whoever saves */
+	for (UBlueprint* Blueprint : Recompiled) {
+		if (GetSettings()->AssetSettings.SaveAssets) {
+			SavePackage(Blueprint->GetOutermost());
+		} else {
+			Blueprint->MarkPackageDirty();
+		}
+	}
+
+	return Settled;
 }
