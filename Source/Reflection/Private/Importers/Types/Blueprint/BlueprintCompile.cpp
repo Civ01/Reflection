@@ -169,7 +169,9 @@ int32 FBlueprintSettle::Settle() {
 
 			/* One whose compile threw was kept off disk on purpose, and is left that way */
 			if (Blueprint == nullptr || Blueprint->GetOutermost()->HasAnyFlags(RF_Transient)) continue;
-			if (Blueprint->Status != BS_Error) continue;
+			/* Warnings too: a member asked for on a class that was not finished yet is only a warning to the
+			 * compiler, and the node it is on does nothing until it is found */
+			if (Blueprint->Status != BS_Error && Blueprint->Status != BS_UpToDateWithWarnings) continue;
 
 			Failing.Add(Blueprint);
 		}
@@ -179,6 +181,8 @@ int32 FBlueprintSettle::Settle() {
 		int32 Came = 0;
 
 		for (UBlueprint* Blueprint : Failing) {
+			const EBlueprintStatus Was = Blueprint->Status;
+
 			/* Reconstructed the way loading one does, so a node pointing at something that was not
 			 * there when it was laid out picks up what is there now */
 			FBlueprintEditorUtils::RefreshAllNodes(Blueprint);
@@ -187,10 +191,11 @@ int32 FBlueprintSettle::Settle() {
 
 			Recompiled.Add(Blueprint);
 
-			if (Blueprint->Status != BS_Error) Came++;
+			/* Better counts, errors down to warnings included, since that can be what the next one waits on */
+			if (Blueprint->Status == BS_UpToDate || (Was == BS_Error && Blueprint->Status == BS_UpToDateWithWarnings)) Came++;
 		}
 
-		UE_LOG(LogReflection, Display, TEXT("Settling pass %d: %d of %d blueprint(s) left in error now compile"), Pass + 1, Came, Failing.Num());
+		UE_LOG(LogReflection, Display, TEXT("Settling pass %d: %d of %d blueprint(s) left with errors or warnings improved"), Pass + 1, Came, Failing.Num());
 
 		Settled += Came;
 

@@ -19,13 +19,13 @@ REFLECTION_API UBlueprint* CreateBlueprintGuarded(UClass* ParentClass, UObject* 
  *
  * A character that names its weapon brings the weapon in while the character is still being made,
  * and the weapon compiles against a character with none of its variables or dispatchers yet. Each one
- * compiled during a run is remembered, and once the run is over the ones still in error have their
+ * compiled during a run is remembered, and once the run is over the ones left with errors or warnings have their
  * nodes refreshed and are compiled again against everything that has finished since. */
 struct REFLECTION_API FBlueprintSettle {
 	/* Forgets what an earlier run left behind */
 	static void Begin();
 
-	/* Compiles again whatever was left in error, as long as each pass fixes something. Answers how many came good. */
+	/* Compiles again whatever was left with errors or warnings, as long as each pass fixes something. Answers how many came good. */
 	static int32 Settle();
 
 	/* Remembered by every guarded compile, so nothing has to say it */
