@@ -1315,8 +1315,6 @@ bool IAnimationBlueprintImporter::Expose(UAnimGraphNode_Base* Node, const FName 
 }
 
 UEdGraphPin* IAnimationBlueprintImporter::PinAnswering(const FString& Owner, const FName Member) {
-	if (UEdGraphPin* Said = IBlueprintImporter::PinAnswering(Owner, Member)) return Said;
-
 	/* Found among every graph's nodes, since a state keeps its own apart from the graph around it */
 	UAnimGraphNode_Base* Node = nullptr;
 
@@ -1332,8 +1330,11 @@ UEdGraphPin* IAnimationBlueprintImporter::PinAnswering(const FString& Owner, con
 		}
 	}
 
-	if (Node == nullptr) return nullptr;
+	/* Not one of the graph's nodes, a transition's rule for one, so only what was said counts */
+	if (Node == nullptr) return IBlueprintImporter::PinAnswering(Owner, Member);
 
+	/* Asked of the node every time rather than of what was said before: the pin said before may
+	 * belong to a layout the node has had since */
 	UEdGraphPin* Pin = Node->FindPin(Member, EGPD_Input);
 
 	/* An input worked out rather than typed in is one the node keeps hidden until something feeds
@@ -1343,6 +1344,11 @@ UEdGraphPin* IAnimationBlueprintImporter::PinAnswering(const FString& Owner, con
 		Node->ReconstructNode();
 
 		Pin = Node->FindPin(Member, EGPD_Input);
+
+		/* Everything already said about this node points at pins it no longer has */
+		for (FDecided& Says : Decides) {
+			if (Says.Owner == Owner) Says.Pin = Node->FindPin(Says.Member, EGPD_Input);
+		}
 	}
 
 	/* A pose is drawn from node to node, and was never worked out anywhere */

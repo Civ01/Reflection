@@ -1040,6 +1040,15 @@ UEdGraphPin* IBlueprintImporter::PinAnswering(const FString& Owner, const FName 
 }
 
 void IBlueprintImporter::Answers(const FString& Owner, const FName Member, UEdGraphPin* Pin) {
+	/* Said again, where the node has been laid out since and the pin is a new one */
+	for (FDecided& Says : Decides) {
+		if (Says.Owner == Owner && Says.Member == Member) {
+			Says.Pin = Pin;
+
+			return;
+		}
+	}
+
 	if (Owner.IsEmpty() || Pin == nullptr) return;
 
 	Decides.Add(FDecided{ Owner, Member, Pin });
@@ -1339,6 +1348,17 @@ int32 IBlueprintImporter::ConstructGraphs() {
 		}
 	}
 
+	/* What each handler was found to answer, kept until every handler has been read */
+	struct FMatched {
+		int32 From = INDEX_NONE;
+		int32 To = INDEX_NONE;
+		FString Owner;
+		TArray<FName> Members;
+		TArray<int32> Ways;
+	};
+
+	TArray<FMatched> Matched;
+
 	if (Ubergraph.IsValid() && Handlers.Num() > 0) {
 		/* Where in what was read each statement sits, by the address it was written at */
 		TMap<int32, int32> Sits;
@@ -1397,7 +1417,9 @@ int32 IBlueprintImporter::ConstructGraphs() {
 
 			int32 To = INDEX_NONE;
 
-			TArray<TPair<FName, UEdGraphPin*>> Answered;
+			/* Said as names while reading, and turned into pins only once it is done: drawing a hidden
+			 * input lays its node out again, and every pin it had before is gone after that */
+			TArray<FName> Answered;
 			FString AnsweredOwner;
 
 			for (int32 Index = At; Index < Ubergraphed.Num(); ++Index) {
@@ -1423,10 +1445,8 @@ int32 IBlueprintImporter::ConstructGraphs() {
 					/* Another node's, which ends what this handler is answerable for */
 					if (Owns != nullptr && Owner != *Owns) break;
 
-					UEdGraphPin* Pin = PinAnswering(Owner, FName(*Member));
-
-					if (Pin != nullptr) {
-						Answered.Add(TPair<FName, UEdGraphPin*>(FName(*Member), Pin));
+					if (PinAnswering(Owner, FName(*Member)) != nullptr) {
+						Answered.AddUnique(FName(*Member));
 						AnsweredOwner = Owner;
 
 						To = One.GetInteger(TEXT("StatementIndex"), INDEX_NONE);
@@ -1443,7 +1463,34 @@ int32 IBlueprintImporter::ConstructGraphs() {
 
 			if (To == INDEX_NONE || To < From || Answered.Num() == 0) continue;
 
-			UEdGraphPin* First = Answered[0].Value;
+			Matched.Add(FMatched{ From, To, AnsweredOwner, Answered, Ways });
+		}
+	}
+
+	/* Made into graphs only once every handler has been read.
+	 *
+	 * Reading one can draw a hidden input on its node, which lays the node out again and leaves every
+	 * pin it had before pointing at nothing. Taken as each handler was read, a graph made for an
+	 * earlier handler would be left holding those, and laying it out stops the editor. */
+	for (const FMatched& Match : Matched) {
+		{
+			const int32 From = Match.From;
+			const int32 To = Match.To;
+			const FString& AnsweredOwner = Match.Owner;
+			const TArray<FName>& Answered = Match.Members;
+			const TArray<int32>& Ways = Match.Ways;
+
+			TArray<TPair<FName, UEdGraphPin*>> Pins;
+
+			for (const FName& Member : Answered) {
+				if (UEdGraphPin* Pin = PinAnswering(AnsweredOwner, Member); Pin != nullptr && Pin->GetOwningNodeUnchecked() != nullptr) {
+					Pins.Add(TPair<FName, UEdGraphPin*>(Member, Pin));
+				}
+			}
+
+			if (Pins.Num() == 0) continue;
+
+			UEdGraphPin* First = Pins[0].Value;
 
 			if (First == nullptr || First->GetOwningNode() == nullptr) continue;
 
@@ -1462,7 +1509,7 @@ int32 IBlueprintImporter::ConstructGraphs() {
 
 			Made->Only(From, To);
 
-			for (const TPair<FName, UEdGraphPin*>& One : Answered) {
+			for (const TPair<FName, UEdGraphPin*>& One : Pins) {
 				Made->HandsInto(AnsweredOwner, One.Key, One.Value);
 			}
 
@@ -1474,7 +1521,7 @@ int32 IBlueprintImporter::ConstructGraphs() {
 			Rules.Add(Made);
 
 			UE_LOG(LogReflection, Display, TEXT("%d..%d decides %d input(s) of '%s' (first '%s'), so it is laid out in '%s' rather than among the events"),
-				From, To, Answered.Num(), *AnsweredOwner, *Answered[0].Key.ToString(), *Rule->GetName());
+				From, To, Pins.Num(), *AnsweredOwner, *Pins[0].Key.ToString(), *Rule->GetName());
 		}
 	}
 
