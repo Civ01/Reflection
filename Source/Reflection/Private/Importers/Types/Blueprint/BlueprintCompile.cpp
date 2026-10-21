@@ -18,6 +18,7 @@
 #include "EdGraphSchema_K2.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "UObject/UObjectIterator.h"
+#include "Modules/Toolbar/Tools/ImportFromPath.h"
 
 namespace {
 	/* Where the slow tasks were before, and what to drop back to afterwards.
@@ -139,6 +140,9 @@ UBlueprint* CreateBlueprintGuarded(UClass* ParentClass, UObject* Outer, const FN
 namespace {
 	TArray<TWeakObjectPtr<UBlueprint>> GSettleTracked;
 
+	/* The ones to read again, once everything they call has been laid out */
+	TArray<TWeakObjectPtr<UBlueprint>> GSettleReread;
+
 	/* Settling compiles through the same guard, which would only put each one back on the list */
 	bool bSettleRunning = false;
 
@@ -231,6 +235,13 @@ namespace {
 
 void FBlueprintSettle::Begin() {
 	GSettleTracked.Reset();
+	GSettleReread.Reset();
+}
+
+void FBlueprintSettle::Reread(UBlueprint* Blueprint) {
+	if (Blueprint == nullptr || bSettleRunning) return;
+
+	GSettleReread.AddUnique(Blueprint);
 }
 
 void FBlueprintSettle::Track(UBlueprint* Blueprint) {
@@ -249,6 +260,32 @@ int32 FBlueprintSettle::Settle() {
 
 	TSet<UBlueprint*> Recompiled;
 	int32 Settled = 0;
+
+	/* Read again first, once and in the order they asked.
+	 *
+	 * A call to a function another blueprint declares can only be laid out once that blueprint has
+	 * declared it, which is the last thing its import does. A character brings in its components and
+	 * widgets long before it gets there, and they all call into it and into its function library,
+	 * so every one of those calls was dropped with what it was wired to. Everything is here now,
+	 * and a second import lays the same graphs out again over the ones it left. */
+	{
+		TArray<TWeakObjectPtr<UBlueprint>> Rereading = MoveTemp(GSettleReread);
+		GSettleReread.Reset();
+
+		int32 Reread = 0;
+
+		for (const TWeakObjectPtr<UBlueprint>& Weak : Rereading) {
+			UBlueprint* Blueprint = Weak.Get();
+
+			if (Blueprint == nullptr || Blueprint->GetOutermost()->HasAnyFlags(RF_Transient)) continue;
+
+			if (TToolImportFromPath::Import(Blueprint->GetOutermost()->GetName())) Reread++;
+		}
+
+		if (Rereading.Num() > 0) {
+			UE_LOG(LogReflection, Display, TEXT("Settling: %d of %d blueprint(s) that called something not laid out yet were read again"), Reread, Rereading.Num());
+		}
+	}
 
 	/* A blueprint coming good can be what the next one was waiting on, so it goes round again while
 	 * anything changes. Bounded, since one that will never compile would otherwise keep it going. */

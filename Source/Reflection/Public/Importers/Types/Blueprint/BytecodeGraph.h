@@ -335,6 +335,10 @@ private:
 
 	TArray<FString> Unhandled;
 
+	/* Whether something missed would be there to find once the run is over: a call to a function a
+	 * blueprint or a function library declares, which only exists once that one has been laid out */
+	bool bWorthRereading = false;
+
 	/* Ways out that something tried to claim twice */
 	TArray<FString> Contested;
 
