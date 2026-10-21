@@ -1270,6 +1270,33 @@ const UClass* FBytecodeGraph::ClassNamedBy(const FUObjectJsonValueExport& Expres
 	return FindClassByType(Class);
 }
 
+const UClass* FBytecodeGraph::ClassDeclaredBy(const FUObjectJsonValueExport& Expression) {
+	if (!MacroReading::TokenOf(Expression).EndsWith(TEXT("Variable")) || !Expression.Has(TEXT("Variable"))) return nullptr;
+
+	const FUObjectJsonValueExport Held = Expression.GetObject(TEXT("Variable"));
+
+	if (!Held.Has(TEXT("Property"))) return nullptr;
+
+	const FUObjectJsonValueExport Property = Held.GetObject(TEXT("Property"));
+
+	if (!Property.Has(TEXT("PropertyClass"))) return nullptr;
+
+	const FUObjectJsonValueExport Named = Property.GetObject(TEXT("PropertyClass"));
+
+	FString Owner, Member;
+	SplitReference(Named, Owner, Member);
+
+	const FString Class = Member.IsEmpty() ? Owner : Member;
+
+	if (Class.IsEmpty()) return nullptr;
+
+	if (const UClass* Found = FindClassByType(Class)) return Found;
+
+	BringInClass(Named);
+
+	return FindClassByType(Class);
+}
+
 void FBytecodeGraph::BringInClass(const FUObjectJsonValueExport& Named) {
 	FString Where = Named.Has(TEXT("ObjectPath")) ? Named.GetString(TEXT("ObjectPath")) : FString();
 
@@ -2128,7 +2155,14 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 			 * the class off: a function library is called on nothing that appears in the graph. A
 			 * call spelled as a bare name means nothing without the class it is a name on, so the
 			 * class the default object stands for is handed along with it. */
-			if (UK2Node* Node = PlaceCall(Inner, Target.Pin, ClassNamedBy(Upon))) {
+			/* Or what the thing it is made on was declared as, where the pin it comes out of says
+			 * nothing: a macro hands an object out through a wildcard until something is wired to it,
+			 * so a call on what an Is Valid let through has no class to be looked up on */
+			const UClass* Against = ClassNamedBy(Upon);
+
+			if (Against == nullptr) Against = ClassDeclaredBy(Upon);
+
+			if (UK2Node* Node = PlaceCall(Inner, Target.Pin, Against)) {
 				Value.Pin = HandsBack(Node);
 			}
 
@@ -2521,7 +2555,12 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 	if (Expression.JsonObject.IsValid() && Expression.JsonObject->HasTypedField<EJson::String>(TEXT("Function"))) {
 		const FString Named = Expression.GetString(TEXT("Function"));
 
-		const UClass* On = Target != nullptr ? Cast<UClass>(Target->PinType.PinSubCategoryObject.Get()) : Against;
+		/* What the target holds, or else what the caller knows it was declared as. A target given
+		 * with no class of its own is not the blueprint itself: falling back to that finds a function
+		 * of the same name on the wrong class, or none at all. */
+		const UClass* On = Target != nullptr ? Cast<UClass>(Target->PinType.PinSubCategoryObject.Get()) : nullptr;
+
+		if (On == nullptr) On = Against;
 
 		/* Called on nothing means called on the blueprint itself. Its own functions are reached
 		 * through the skeleton: that is the class the editor keeps up to date as graphs are added,
