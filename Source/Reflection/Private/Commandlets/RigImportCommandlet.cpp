@@ -25,9 +25,11 @@
 #include "Animation/AnimData/IAnimationDataModel.h"
 #include "Engine/AssetUserData.h"
 
+/* Outside the RigLogic guard: ReportControlDirections takes one in its signature either way */
+#include "AnimGraphNode_SequencePlayer.h"
+
 #if REFLECTION_RIG_LOGIC
 #include "AnimGraphNode_RigLogic.h"
-#include "AnimGraphNode_SequencePlayer.h"
 #include "AnimGraphNode_PoseBlendNode.h"
 #include "Animation/AnimData/IAnimationDataController.h"
 #include "Animation/AnimData/CurveIdentifier.h"

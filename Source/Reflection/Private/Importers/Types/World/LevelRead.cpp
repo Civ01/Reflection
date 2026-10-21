@@ -33,6 +33,11 @@
 #include "HLOD/HLODProxyDesc.h"
 #include "HierarchicalLOD.h"
 
+/* [5.8] FHierarchicalSimplification moved out of WorldSettings.h, which only forward declares it now */
+#if __has_include("HLOD/HLODSetup.h")
+#include "HLOD/HLODSetup.h"
+#endif
+
 /* [4.26] 	4.26 doesn't find the Importer header on it's own.
  * 			Let's help it out. */
 #if UE4_26
