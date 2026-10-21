@@ -449,6 +449,11 @@ int32 IAnimSequenceImporter::BuildTracks(UAnimSequence* AnimSequence, USkeleton*
 	Controller.OpenBracket(NSLOCTEXT("Reflection", "BuildAnimationSequence", "Building animation sequence"), false);
 	Controller.InitializeModel();
 
+	/* A sequence reflected again still has the tracks the last import gave it. Initializing the
+	 * model leaves them where they are, so every bone is refused as already there (a warning per
+	 * bone, per sequence) and a bone the new data no longer has would keep playing the old keys. */
+	Controller.RemoveAllBoneTracks(false);
+
 	Controller.SetFrameRate(FrameRate, false);
 	Controller.SetNumberOfFrames(FFrameNumber(FrameSpans), false);
 
