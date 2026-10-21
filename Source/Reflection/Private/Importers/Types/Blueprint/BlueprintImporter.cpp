@@ -1312,20 +1312,42 @@ int32 IBlueprintImporter::ConstructGraphs() {
 	UE_LOG(LogReflection, Display, TEXT("%d stretch(es) of the ubergraph are entered by a handler, and %d node member(s) are answered through a pin"), Handlers.Num(), Decides.Num());
 
 	if (Ubergraph.IsValid() && Handlers.Num() > 0 && Decides.Num() > 0) {
-		for (const int32 From : Handlers) {
-			if (From < 0) continue;
+		/* Where in what was read each statement sits, by the address it was written at */
+		TMap<int32, int32> Sits;
 
-			int32 At = INDEX_NONE;
+		for (int32 Index = 0; Index < Ubergraphed.Num(); ++Index) {
+			Sits.Add(Ubergraphed[Index].GetInteger(TEXT("StatementIndex"), INDEX_NONE), Index);
+		}
 
-			for (int32 Index = 0; Index < Ubergraphed.Num(); ++Index) {
-				if (Ubergraphed[Index].GetInteger(TEXT("StatementIndex"), INDEX_NONE) == From) {
-					At = Index;
+		for (const int32 Entered : Handlers) {
+			if (Entered < 0) continue;
 
-					break;
-				}
+			const int32* Found = Sits.Find(Entered);
+
+			if (Found == nullptr) continue;
+
+			int32 At = *Found;
+			int32 From = Entered;
+
+			/* Where a handler is entered is often only a way on to somewhere else.
+			 *
+			 * The compiler is free to put what a rule works out anywhere in the ubergraph, and when
+			 * it does, the address the handler names holds nothing but a jump to it. Read from the
+			 * address it holds no write at all, and the rule is left on its own with nothing wired
+			 * to it: an animation blueprint came back with nearly every transition never taken.
+			 * A jump that is all there is to go on is followed, as far as it keeps being one. */
+			TArray<int32> Ways;
+
+			for (int32 Hops = 0; Hops < 8 && Ubergraphed.IsValidIndex(At) && Ubergraphed[At].GetString(TEXT("Token")) == TEXT("EX_Jump"); ++Hops) {
+				const int32* Lands = Sits.Find(Ubergraphed[At].GetInteger(TEXT("CodeOffset"), INDEX_NONE));
+
+				if (Lands == nullptr) break;
+
+				Ways.Add(From);
+
+				At = *Lands;
+				From = Ubergraphed[At].GetInteger(TEXT("StatementIndex"), INDEX_NONE);
 			}
-
-			if (At == INDEX_NONE) continue;
 
 			/* How far the stretch runs, which is only knowable while it runs straight.
 			 *
@@ -1399,8 +1421,10 @@ int32 IBlueprintImporter::ConstructGraphs() {
 			Made->Only(From, To);
 			Made->HandsInto(Into->Owner, Into->Member, Into->Pin);
 
-			/* And out of the events, where it was never written */
+			/* And out of the events, where it was never written, along with the jumps that led to it */
 			Ubergraph->LeaveOut(From, To);
+
+			for (const int32 Way : Ways) Ubergraph->LeaveOutAt(Way);
 
 			Rules.Add(Made);
 
