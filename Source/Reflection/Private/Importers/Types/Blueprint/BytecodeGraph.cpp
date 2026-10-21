@@ -42,6 +42,7 @@
 #include "Kismet/KismetMathLibrary.h"
 #include "K2Node_AddDelegate.h"
 #include "K2Node_RemoveDelegate.h"
+#include "K2Node_ClearDelegate.h"
 #include "K2Node_CallDelegate.h"
 #include "K2Node_CreateDelegate.h"
 #include "K2Node_BaseMCDelegate.h"
@@ -2014,6 +2015,24 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 
 	/* A call reached for its value, which is the pin it returns on */
 	if (Token == TEXT("EX_CallMath") || Token == TEXT("EX_FinalFunction") || Token == TEXT("EX_LocalFinalFunction") || Token == TEXT("EX_VirtualFunction") || Token == TEXT("EX_LocalVirtualFunction")) {
+		/* A container of one width of real number handed to something that takes the other.
+		 *
+		 * Since real numbers came in two widths, the compiler puts a conversion between a float
+		 * array and a pin that takes doubles, the same way it widens a single number on the way in.
+		 * Nobody drew it: in the graph the array is wired straight across. Laid out as written it is
+		 * a node of wildcards that settle on the wrong type, and both its wires are refused. So it is
+		 * read through to what it was given, the way a widened number is. */
+		if (Expression.Has(TEXT("Function")) && !(Expression.JsonObject.IsValid() && Expression.JsonObject->HasTypedField<EJson::String>(TEXT("Function")))) {
+			FString Owner, Member;
+			SplitReference(Expression.GetObject(TEXT("Function")), Owner, Member);
+
+			if (Owner == TEXT("BlueprintTypeConversions") && Member.StartsWith(TEXT("Convert")) && Expression.Has(TEXT("Parameters"))) {
+				const TArray<FUObjectJsonValueExport> Given = Expression.GetArray(TEXT("Parameters"));
+
+				if (Given.Num() > 0) return Read(Given[0]);
+			}
+		}
+
 		if (UK2Node* Node = PlaceCall(Expression, nullptr)) {
 			Value.Pin = HandsBack(Node);
 		}
@@ -3703,6 +3722,36 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 			const FValue Bound = Read(Statement.GetObject(TEXT("Delegate")));
 
 			if (Bound.Pin != nullptr && Node->GetDelegatePin() != nullptr) Connect(Bound.Pin, Node->GetDelegatePin());
+		}
+
+		ChainExecution(Node);
+
+		Placed++;
+
+		return true;
+	}
+
+	/* Everything bound to a delegate that keeps several, let go at once, which is Unbind All Events */
+	if (Token == TEXT("EX_ClearMulticastDelegate")) {
+		UK2Node_ClearDelegate* Node = AddNode<UK2Node_ClearDelegate>();
+
+		/* Spelled one way by one writer and another by the next */
+		FUObjectJsonValueExport Cleared;
+
+		for (const TCHAR* Field : { TEXT("DelegateToClear"), TEXT("Delegate"), TEXT("MulticastDelegate") }) {
+			if (Statement.Has(Field)) {
+				Cleared = Statement.GetObject(Field);
+
+				break;
+			}
+		}
+
+		UEdGraphPin* Against = PointAtDelegate(Node, Cleared);
+
+		Node->AllocateDefaultPins();
+
+		if (Against != nullptr && Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input) != nullptr) {
+			Connect(Against, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
 		}
 
 		ChainExecution(Node);
