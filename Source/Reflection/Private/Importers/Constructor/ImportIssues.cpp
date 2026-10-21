@@ -2,6 +2,8 @@
 
 #include "Importers/Constructor/ImportIssues.h"
 
+#include "Importers/Types/Blueprint/BlueprintCompile.h"
+
 #include "Engine/Log.h"
 #include "Engine/Package.h"
 #include "Modules/UI/Import/SImportIssuesPanel.h"
@@ -114,10 +116,15 @@ FLinearColor GetImportIssueColor(const EImportIssue Kind) {
 }
 
 void FImportIssues::Begin() {
+	FBlueprintSettle::Begin();
+
 	Clear();
 }
 
 void FImportIssues::Finish() {
+	/* Before anything is reported, since what settles is what was wrong about the run */
+	FBlueprintSettle::Settle();
+
 	/* The stack outliving the run means a Push went unpopped, and the next run would inherit it */
 	GStack.Reset();
 
