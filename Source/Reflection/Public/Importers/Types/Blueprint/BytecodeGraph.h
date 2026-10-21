@@ -338,6 +338,9 @@ private:
 	 * name it was written from. Whatever waits on the one is waiting on the other. */
 	TMap<FString, FString> Aliases;
 
+	/* Every value a scratch local was said to hold outright, spelled as the bytecode spells it */
+	TMap<FString, TSet<FString>> SaidValues;
+
 	/* The name a value is read under, against the event that hands it over */
 	TMap<FString, TPair<TWeakObjectPtr<UK2Node>, FString>> Handed;
 
