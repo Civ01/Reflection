@@ -81,6 +81,9 @@ protected:
 	/* Draws a property on the node so something can be wired to it, and says whether it had to */
 	bool Expose(UAnimGraphNode_Base* Node, FName Member) const;
 
+	/* The input of an animation node that a handler's stretch writes, drawn if it was hidden */
+	virtual UEdGraphPin* PinAnswering(const FString& Owner, FName Member) override;
+
 	/* Says every pin of every node as somewhere a stretch of the ubergraph can answer into */
 	void AnswerThrough(FUObjectExportContainer* Container);
 
