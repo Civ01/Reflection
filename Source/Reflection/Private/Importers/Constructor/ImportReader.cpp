@@ -382,7 +382,7 @@ IImporter* IImportReader::ReadExportAndImport(FUObjectExportContainer* Container
 		int32 Built = 0;
 
 		for (const UObject* One : Held) {
-			if (One != nullptr && !One->IsA<UMetaData>()) Built++;
+			if (One != nullptr && !One->IsA<UReflectionPackageMetaData>()) Built++;
 		}
 
 		/* Only taken off the list of things to save. Thrown away instead, the name stays taken by a

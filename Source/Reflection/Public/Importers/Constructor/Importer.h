@@ -26,8 +26,16 @@
 
 /* [4.26] 	4.26 doesn't find the UMetaData header on it's own.
  * 			Let's help it out. */
-#if UE4_26
+#if UE4_26 || UE5_8_BEYOND
 #include "UObject/MetaData.h"
+#endif
+
+/* [5.8] Package metadata is no longer an object: it lives on the package as FMetaData, and the old
+ * class survives as UDEPRECATED_MetaData, which only an older package loaded in still carries. */
+#if UE5_8_BEYOND
+using UReflectionPackageMetaData = UDEPRECATED_MetaData;
+#else
+using UReflectionPackageMetaData = UMetaData;
 #endif
 
 /* The file a package name lands on, if any. */
@@ -55,7 +63,7 @@ inline bool PackageHoldsAsset(const FString& LongPackageName) {
 
 		for (const UObject* One : Inside) {
 			/* Every package carries one of these whether or not anything was built in it */
-			if (One != nullptr && !One->IsA<UMetaData>()) return true;
+			if (One != nullptr && !One->IsA<UReflectionPackageMetaData>()) return true;
 		}
 
 		return false;
