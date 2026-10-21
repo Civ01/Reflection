@@ -34,6 +34,7 @@
 #include "Importers/Types/Blueprint/BlueprintGraphs.h"
 #include "Importers/Types/Blueprint/BlueprintVariables.h"
 #include "Importers/Types/Blueprint/BlueprintCompile.h"
+#include "Engine/BlueprintGeneratedClass.h"
 #include "K2Node_CommutativeAssociativeBinaryOperator.h"
 #include "K2Node_CallMaterialParameterCollectionFunction.h"
 #include "K2Node_CallDataTableFunction.h"
@@ -2151,6 +2152,29 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 
 				Node->VariableReference.SetExternalMember(*Name, On);
 				Node->AllocateDefaultPins();
+
+				/* A member the other blueprint has not got yet.
+				 *
+				 * Its class exists as soon as its import starts, but what it holds only arrives as that
+				 * import goes on: a component is a variable once the construction script is compiled,
+				 * which is long after everything nested under it has been read. The node then comes up
+				 * with no pin to read from, and whatever the member was handed to is left with nothing:
+				 * a character's mesh read for its location leaves the location call with no target.
+				 *
+				 * The script says what the member is, so the pin is made from that. The end of the run
+				 * lays the node out again against the finished class, and the pin keeps its wires by
+				 * name; the blueprint is read again as well, in case anything else missed it too. */
+				if (Node->FindPin(*Name, EGPD_Output) == nullptr && Held.Has(TEXT("Property"))) {
+					FEdGraphPinType Holds;
+
+					if (FBlueprintVariables::GetPinType(Held.GetObject(TEXT("Property")).JsonObject, Holds)) {
+						Node->CreatePin(EGPD_Output, Holds, FName(*Name));
+
+						UE_LOG(LogReflectionBytecode, Display, TEXT("\"%s\" is not on %s yet, so it was read as the script describes it"), *Name, *On->GetName());
+					}
+
+					if (On->IsA<UBlueprintGeneratedClass>()) bWorthRereading = true;
+				}
 
 				Connect(Target.Pin, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
 
@@ -5408,13 +5432,13 @@ int32 FBytecodeGraph::Build() {
 		UE_LOG(LogReflectionBytecode, Warning, TEXT("%d way(s) out were already spoken for: %s"), Contested.Num(), *FString::Join(Contested, TEXT(", ")));
 	}
 
+	/* Read again once the run is over, when whatever it called or read has been laid out too */
+	if (bWorthRereading) {
+		FBlueprintSettle::Reread(Graph->GetTypedOuter<UBlueprint>());
+	}
+
 	if (Unhandled.Num() > 0) {
 		UE_LOG(LogReflectionBytecode, Warning, TEXT("\"%s\" placed %d node(s), and read nothing from: %s"), *Graph->GetName(), Placed, *FString::Join(Unhandled, TEXT(", ")));
-
-		/* Read again once the run is over, when whatever it called has been laid out too */
-		if (bWorthRereading) {
-			FBlueprintSettle::Reread(Graph->GetTypedOuter<UBlueprint>());
-		}
 
 		/* Said where somebody will see it and not only in the log. A graph that came back with
 		 * something missing still opens and still compiles, and what it does then is not what the
