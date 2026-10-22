@@ -175,7 +175,19 @@ namespace {
 			OutType.PinCategory = UEdGraphSchema_K2::PC_Float;
 #endif
 		}
-		else if (Kind == TEXT("ByteProperty")) OutType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+		else if (Kind == TEXT("ByteProperty")) {
+			OutType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+
+			/* A byte can carry an enum, which the pin has to say as well: an array of plain bytes
+			 * will not wire into an array of EObjectTypeQuery, and Make Array laid out as one is
+			 * left with nothing to hand the trace it was made for */
+			if (Property.Has(TEXT("Enum"))) {
+				FString Owner, Member;
+				SplitReference(Property.GetObject(TEXT("Enum")), Owner, Member);
+
+				if (!Owner.IsEmpty()) OutType.PinSubCategoryObject = FindEnumByType(Owner);
+			}
+		}
 		else if (Kind == TEXT("NameProperty")) OutType.PinCategory = UEdGraphSchema_K2::PC_Name;
 		else if (Kind == TEXT("StrProperty")) OutType.PinCategory = UEdGraphSchema_K2::PC_String;
 		else if (Kind == TEXT("TextProperty")) OutType.PinCategory = UEdGraphSchema_K2::PC_Text;
