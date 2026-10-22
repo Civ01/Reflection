@@ -5,6 +5,8 @@
 #include "AnimationGraphSchema.h"
 #include "AnimGraphNode_Root.h"
 #include "EdGraphSchema_K2.h"
+#include "K2Node_FunctionEntry.h"
+#include "K2Node_FunctionResult.h"
 
 #include "KismetCompilerModule.h"
 #include "MovieScene.h"
@@ -312,13 +314,23 @@ int32 IBlueprintImporter::ConstructBody() {
 		UE_LOG(LogReflection, Display, TEXT("%d timeline(s) rebuilt"), Timelines);
 	}
 
+	/* Only declared and never laid out: kept for other blueprints to be made against */
+	const bool bStub = GetSettings()->AssetSettings.IsStubbed(Blueprint->GetOutermost()->GetName());
+
 	/* Brought in by another blueprint, which is still being made: declared now, laid out later */
-	bDeclareOnly = GetSettings()->AssetSettings.ImportBlueprintCode && FBlueprintSettle::ShouldDefer();
+	bDeclareOnly = bStub || (GetSettings()->AssetSettings.ImportBlueprintCode && FBlueprintSettle::ShouldDefer());
 
 	/* What the blueprint does rather than what it is, and the one part read back from bytecode rather than copied */
 	const int32 Laid = GetSettings()->AssetSettings.ImportBlueprintCode ? ConstructGraphs() : 0;
 
-	if (bDeclareOnly) {
+	if (bStub) {
+		/* Nothing to come back for at the end of the run */
+		FBlueprintSettle::Undefer(Blueprint);
+
+		const int32 Stubbed = FinishStubs();
+
+		UE_LOG(LogReflection, Display, TEXT("\"%s\" came across as stubs: %d function(s) declared with nothing inside them"), *GetAssetName(), Stubbed);
+	} else if (bDeclareOnly) {
 		FBlueprintSettle::Defer(Blueprint);
 
 		UE_LOG(LogReflection, Display, TEXT("\"%s\" was brought in by another blueprint, so its graphs were declared and will be laid out at the end of the run"), *GetAssetName());
@@ -393,6 +405,42 @@ int32 IBlueprintImporter::ConstructBody() {
 	}
 
 	return Laid;
+}
+
+int32 IBlueprintImporter::FinishStubs() {
+	int32 Stubbed = 0;
+
+	/* A function whose entry leads nowhere still compiles, but says so: the run goes straight from
+	 * the entry to the return, which is what an empty function is. Whatever it hands back is its
+	 * default. */
+	for (UEdGraph* Graph : Blueprint->FunctionGraphs) {
+		if (Graph == nullptr) continue;
+
+		UK2Node_FunctionEntry* Entry = nullptr;
+		UK2Node_FunctionResult* Result = nullptr;
+
+		for (UEdGraphNode* Node : Graph->Nodes) {
+			if (Entry == nullptr) Entry = ::Cast<UK2Node_FunctionEntry>(Node);
+			if (Result == nullptr) Result = ::Cast<UK2Node_FunctionResult>(Node);
+		}
+
+		if (Entry == nullptr) continue;
+
+		Stubbed++;
+
+		if (Result == nullptr) continue;
+
+		UEdGraphPin* Then = Entry->FindPin(UEdGraphSchema_K2::PN_Then, EGPD_Output);
+		UEdGraphPin* Execute = Result->FindPin(UEdGraphSchema_K2::PN_Execute, EGPD_Input);
+
+		if (Then != nullptr && Execute != nullptr && Then->LinkedTo.Num() == 0) {
+			Then->MakeLinkTo(Execute);
+		}
+	}
+
+	CompileBlueprintGuarded(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection);
+
+	return Stubbed;
 }
 
 int32 IBlueprintImporter::ConstructVariables() {

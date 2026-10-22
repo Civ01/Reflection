@@ -57,6 +57,10 @@ protected:
 	 * cooked as. Returns how many nodes it placed across all of them. */
 	int32 ConstructGraphs();
 
+	/* Leaves the functions ConstructGraphs only declared as stubs that compile: entered and returned
+	 * from with nothing between. Answers how many there were. */
+	int32 FinishStubs();
+
 	/* Says which interfaces the blueprint answers for, and answers how many it took on */
 	int32 ConstructInterfaces();
 
