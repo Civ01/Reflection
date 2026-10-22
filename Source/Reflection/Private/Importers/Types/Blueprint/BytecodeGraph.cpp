@@ -3583,23 +3583,23 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 		 * Return pin of that name to give it to, and the write is lost. The graph says it with
 		 * Set By-Ref Var, onto the entry's pin. */
 		if (MacroReading::TokenOf(Variable) == TEXT("EX_LocalOutVariable") && !Name.IsEmpty() && FindAnswer(Name) == nullptr) {
-			UEdGraphPin* Handed = nullptr;
+			UEdGraphPin* ByReference = nullptr;
 
 			for (UEdGraphNode* Each : Graph->Nodes) {
 				if (Each == nullptr || !Each->IsA<UK2Node_FunctionEntry>()) continue;
 
-				if (UEdGraphPin* Takes = Each->FindPin(*Name, EGPD_Output); Takes != nullptr && Takes->PinType.bIsReference) Handed = Takes;
+				if (UEdGraphPin* Takes = Each->FindPin(*Name, EGPD_Output); Takes != nullptr && Takes->PinType.bIsReference) ByReference = Takes;
 
 				break;
 			}
 
-			if (Handed != nullptr) {
+			if (ByReference != nullptr) {
 				UK2Node_VariableSetRef* Sets = AddNode<UK2Node_VariableSetRef>();
 
 				Sets->AllocateDefaultPins();
 
 				/* The reference first, since what it holds is what the value pin learns to take */
-				Connect(Handed, Sets->GetTargetPin());
+				Connect(ByReference, Sets->GetTargetPin());
 
 				Give(Expression, Sets->GetValuePin());
 
