@@ -374,6 +374,22 @@ UFunction* FBytecodeGraph::FindFunctionOn(const UClass* Class, const FString& Me
 
 	if (UFunction* Found = Class->FindFunctionByName(*Member)) return Found;
 
+	/* A blueprint's class only carries what it was last compiled with. A function its graphs
+	 * declare is on the skeleton the editor keeps as soon as it is declared, and on the class the
+	 * blueprint compiles to only once that compile has run: a call to it on another instance of
+	 * the same blueprint, or on one brought in a moment ago, finds nothing on the class the value
+	 * holds. The blueprint behind the class has both. */
+	if (const UBlueprint* Behind = ::Cast<UBlueprint>(Class->ClassGeneratedBy)) {
+		const UClass* Skeleton = Behind->SkeletonGeneratedClass.Get();
+		const UClass* Generated = Behind->GeneratedClass.Get();
+
+		for (const UClass* Other : { Skeleton, Generated }) {
+			if (Other == nullptr || Other == Class) continue;
+
+			if (UFunction* Found = Other->FindFunctionByName(*Member)) return Found;
+		}
+	}
+
 	/* Called by a name the engine has since moved on from. What a float math node was called is
 	 * what a double one is called now, and the engine is the one that knows which became which,
 	 * so it is asked rather than guessed at. */
@@ -1304,6 +1320,31 @@ const UClass* FBytecodeGraph::ClassNamedBy(const FUObjectJsonValueExport& Expres
 }
 
 const UClass* FBytecodeGraph::ClassDeclaredBy(const FUObjectJsonValueExport& Expression) {
+	/* An element of an array, which is declared as whatever the array holds */
+	if (MacroReading::TokenOf(Expression) == TEXT("EX_ArrayGetByRef") && Expression.Has(TEXT("ArrayVariable"))) {
+		const FUObjectJsonValueExport Array = Expression.GetObject(TEXT("ArrayVariable"));
+
+		if (!Array.Has(TEXT("Variable"))) return nullptr;
+
+		const FUObjectJsonValueExport Held = Array.GetObject(TEXT("Variable"));
+
+		if (!Held.Has(TEXT("Property"))) return nullptr;
+
+		const FUObjectJsonValueExport Listed = Held.GetObject(TEXT("Property"));
+
+		if (!Listed.Has(TEXT("Inner"))) return nullptr;
+
+		/* Asked again as a plain variable of that element's type */
+		const TSharedPtr<FJsonObject> Wrapped = MakeShared<FJsonObject>();
+		Wrapped->SetObjectField(TEXT("Property"), Listed.GetObject(TEXT("Inner")).JsonObject);
+
+		const TSharedPtr<FJsonObject> Element = MakeShared<FJsonObject>();
+		Element->SetStringField(TEXT("Token"), TEXT("EX_LocalVariable"));
+		Element->SetObjectField(TEXT("Variable"), Wrapped);
+
+		return ClassDeclaredBy(FUObjectJsonValueExport(Element));
+	}
+
 	if (!MacroReading::TokenOf(Expression).EndsWith(TEXT("Variable")) || !Expression.Has(TEXT("Variable"))) return nullptr;
 
 	const FUObjectJsonValueExport Held = Expression.GetObject(TEXT("Variable"));
