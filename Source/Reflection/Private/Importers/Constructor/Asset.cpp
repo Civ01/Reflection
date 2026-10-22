@@ -189,6 +189,9 @@ template bool FAssetUtilities::ConstructAsset<UFontFace>(const FString&, const F
  * have yet */
 template bool FAssetUtilities::ConstructAsset<USkeleton>(const FString&, const FString&, const FString&, TObjectPtr<USkeleton>&, bool&);
 
+/* A data table's row struct, which is an asset of its own when the game declared it in the editor */
+template bool FAssetUtilities::ConstructAsset<UScriptStruct>(const FString&, const FString&, const FString&, TObjectPtr<UScriptStruct>&, bool&);
+
 namespace {
 	/* Packages with an import open further down the stack, innermost last. */
 	TArray<FString> GAssetsUnderConstruction;
