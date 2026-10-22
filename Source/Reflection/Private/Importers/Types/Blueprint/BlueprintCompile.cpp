@@ -1,6 +1,7 @@
 /* Copyright Reflection Contributors 2024-2026 */
 
 #include "Importers/Types/Blueprint/BlueprintCompile.h"
+#include "Misc/ScopeExit.h"
 
 #include "Engine/EngineUtilities.h"
 #include "Importers/Constructor/ImportIssues.h"
@@ -80,12 +81,53 @@ namespace {
 	}
 }
 
+namespace {
+	/* Every blueprint whose import is under way, outermost first */
+	TArray<TWeakObjectPtr<UBlueprint>> GUnderConstruction;
+}
+
+FBlueprintUnderConstruction::FBlueprintUnderConstruction(UBlueprint* Blueprint) : Held(Blueprint) {
+	if (Blueprint != nullptr) GUnderConstruction.Add(Blueprint);
+}
+
+FBlueprintUnderConstruction::~FBlueprintUnderConstruction() {
+	for (int32 At = GUnderConstruction.Num() - 1; At >= 0; --At) {
+		if (GUnderConstruction[At] == Held) {
+			GUnderConstruction.RemoveAt(At);
+
+			break;
+		}
+	}
+}
+
 bool CompileBlueprintGuarded(UBlueprint* Blueprint, const EBlueprintCompileOptions Options) {
 	if (Blueprint == nullptr) return false;
 
 	const FString Named = Blueprint->GetName();
 
 	const int32 Depth = SlowTasks();
+
+	/* Whatever is half built further up the stack is left out of what this compile reaches, and
+	 * put back once it is done (see FBlueprintUnderConstruction) */
+	TArray<TWeakObjectPtr<UBlueprint>> Spared;
+
+#if WITH_EDITORONLY_DATA
+	for (const TWeakObjectPtr<UBlueprint>& Building : GUnderConstruction) {
+		if (!Building.IsValid() || Building.Get() == Blueprint) continue;
+
+		if (Blueprint->CachedDependents.Remove(Building) > 0) Spared.Add(Building);
+	}
+
+	ON_SCOPE_EXIT {
+		for (const TWeakObjectPtr<UBlueprint>& Building : Spared) {
+			if (Building.IsValid()) Blueprint->CachedDependents.Add(Building);
+		}
+	};
+#endif
+
+	if (!Spared.IsEmpty()) {
+		UE_LOG(LogReflection, Display, TEXT("\"%s\" compiled without laying out %d blueprint(s) still being imported that depend on it"), *Named, Spared.Num());
+	}
 
 	if (Attempt(Blueprint, Options)) {
 		FBlueprintSettle::Track(Blueprint);
