@@ -1261,7 +1261,8 @@ namespace {
 		for (FOptionalPinFromProperty& Held : Node->ShowPinForProperties) {
 			if (Held.PropertyName != Member) continue;
 
-			if (Held.bShowPin) return false;
+			/* Already shown, and worth laying out again only where the pin never came of it */
+			if (Held.bShowPin) return Node->FindPin(Member, EGPD_Input) == nullptr;
 
 			Held.bShowPin = true;
 
@@ -2023,9 +2024,6 @@ void IAnimationBlueprintImporter::HandleNodeDeserialization(FUObjectExportContai
 
 		HandlePropertyBinding(NodeExport, GetContainer()->JsonObjects, Node, this, AnimBlueprint);
 
-		/* And whatever the class hands it, which is said the way newer engines say it */
-		ApplyBindings(NodeExport->GetName().ToString(), Node);
-
 		/* A blend by an enum this build has not got, blended by number instead.
 		 *
 		 * The node blends one pose per entry of an enum, and which enum is not on the node: the
@@ -2133,6 +2131,11 @@ void IAnimationBlueprintImporter::HandleNodeDeserialization(FUObjectExportContai
 				}
 			}
 		}
+
+		/* What the class hands it is drawn once every graph is laid out (DrawBindings), when the
+		 * node has its pins. Drawn here, before it has any, the list of what it can show as pins is
+		 * still empty: nothing is shown, nothing is drawn, and each value is reported as handed to
+		 * a pin the node does not have. */
 	}
 }
 
