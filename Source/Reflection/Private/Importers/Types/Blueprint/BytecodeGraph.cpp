@@ -2300,7 +2300,10 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 				On = const_cast<UClass*>(FindClassByType(Owner));
 			}
 
-			if (!Name.IsEmpty() && On != nullptr && Target.Pin != nullptr) {
+			/* Read off something worked out further on as well, which is only a name until then:
+			 * left to fall through, the member is read off the blueprint itself instead, which
+			 * either has nothing of that name or has something else */
+			if (!Name.IsEmpty() && On != nullptr && (Target.Pin != nullptr || !Target.Wanted.IsEmpty())) {
 				UK2Node_VariableGet* Node = AddNode<UK2Node_VariableGet>();
 
 				Node->VariableReference.SetExternalMember(*Name, On);
@@ -2329,7 +2332,7 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 					if (::Cast<UBlueprintGeneratedClass>(On) != nullptr) bWorthRereading = true;
 				}
 
-				Connect(Target.Pin, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
+				Give(Target, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
 
 				Value.Pin = Node->FindPin(*Name, EGPD_Output);
 
@@ -3532,13 +3535,14 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 					? Read(Variable.GetObject(TEXT("ObjectExpression")))
 					: FValue();
 
-				if (Target.Pin != nullptr) {
+				/* Or onto something worked out further on, which is wired once it is laid down */
+				if (Target.Pin != nullptr || !Target.Wanted.IsEmpty()) {
 					UK2Node_VariableSet* Node = AddNode<UK2Node_VariableSet>();
 
 					Node->VariableReference.SetExternalMember(*Member, On);
 					Node->AllocateDefaultPins();
 
-					Connect(Target.Pin, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
+					Give(Target, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
 
 					if (UEdGraphPin* Pin = Node->FindPin(*Member, EGPD_Input)) {
 						Give(Expression, Pin);
