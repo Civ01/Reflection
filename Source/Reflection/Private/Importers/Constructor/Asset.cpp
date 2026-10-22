@@ -345,6 +345,23 @@ bool FAssetUtilities::ConstructAsset(const FString& Path, const FString& RealPat
 		}
 
 		const TSharedPtr<FJsonObject> JsonObject = Response->GetArrayField(TEXT("exports"))[0]->AsObject();
+
+		/* Asked for as something more general than it is, and it turns out to be a texture.
+		 *
+		 * A pin or property typed as any texture asks for UTexture, which nothing can be, so the
+		 * question goes out as an unknowable one and the package is handed to the reader. The
+		 * reader has never built a texture: they are made by the texture import alone, so the
+		 * reader looks at a perfectly good Texture2D and reports that nothing can import it. The
+		 * export says what it really is, and that is what decides where it goes. */
+		if (FString Actual; JsonObject.IsValid() && JsonObject->TryGetStringField(TEXT("Type"), Actual) && FTextureTypes::IsSupported(Actual)) {
+			UTexture* Texture = nullptr;
+
+			bSuccess = FTextureImport::FromCloud(RealPath, Path, Texture);
+			if (bSuccess) OutObject = Cast<T>(Texture);
+
+			return true;
+		}
+
 		FString PackagePath;
 		FString AssetName;
 		RealPath.Split(".", &PackagePath, &AssetName);
