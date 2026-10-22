@@ -3624,6 +3624,11 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 				 * hold yet, so whoever reads this one is pointed at that one instead, and is wired
 				 * to it once it is laid down. */
 				Aliases.Add(Name, Expression.Wanted);
+			} else if (!Expression.Literal.IsEmpty() && (Constants.Contains(Name) || IsCompilerLocal(Name))) {
+				/* Or a local the compiler made for one pin, which carries a value as well when what
+				 * it was worked out from turned out to be one: a constant cast to another width on the
+				 * way to a call is the same constant at that call */
+				Carried.Add(Name, Expression.Literal);
 			} else if (Constants.Contains(Name) && !Expression.Literal.IsEmpty()) {
 				/* Stretch as what it says rather than laid down as a node. Whoever reads it is a pin
 				 * that was given this value, and a pin holds its own value. */
