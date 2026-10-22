@@ -8,6 +8,10 @@ class IBlueprintImporter : public IImporter {
 protected:
 	UBlueprint* Blueprint = nullptr;
 
+	/* Only declaring the graphs this time round: brought in by something else, and laid out at the
+	 * end of the run instead */
+	bool bDeclareOnly = false;
+
 	/* A property the class carries that some graph answers through, rather than writing */
 	struct FDecided {
 		FString Owner;

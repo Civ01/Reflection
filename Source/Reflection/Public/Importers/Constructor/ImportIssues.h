@@ -56,6 +56,10 @@ public:
 	static void Push(const FString& Name, const FString& Path, const FString& Type);
 	static void Pop();
 
+	/* How many assets are being imported inside one another right now: one for the asset the run
+	 * asked for, more for whatever it brought in on the way */
+	static int32 Depth();
+
 	static void Report(EImportIssue Kind, const FString& Summary, const FString& Detail = FString());
 	static void ReportFor(const FString& Name, const FString& Path, const FString& Type, EImportIssue Kind, const FString& Summary, const FString& Detail = FString());
 

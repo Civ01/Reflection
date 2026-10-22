@@ -312,8 +312,19 @@ int32 IBlueprintImporter::ConstructBody() {
 		UE_LOG(LogReflection, Display, TEXT("%d timeline(s) rebuilt"), Timelines);
 	}
 
+	/* Brought in by another blueprint, which is still being made: declared now, laid out later */
+	bDeclareOnly = GetSettings()->AssetSettings.ImportBlueprintCode && FBlueprintSettle::ShouldDefer();
+
 	/* What the blueprint does rather than what it is, and the one part read back from bytecode rather than copied */
 	const int32 Laid = GetSettings()->AssetSettings.ImportBlueprintCode ? ConstructGraphs() : 0;
+
+	if (bDeclareOnly) {
+		FBlueprintSettle::Defer(Blueprint);
+
+		UE_LOG(LogReflection, Display, TEXT("\"%s\" was brought in by another blueprint, so its graphs were declared and will be laid out at the end of the run"), *GetAssetName());
+	} else {
+		FBlueprintSettle::Undefer(Blueprint);
+	}
 
 	if (!GetSettings()->AssetSettings.ImportBlueprintCode) {
 		FImportIssues::Report(EImportIssue::Setting,
@@ -1824,6 +1835,11 @@ int32 IBlueprintImporter::ConstructGraphs() {
 	{
 		CompileBlueprintGuarded(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection);
 	}
+
+	/* Declared and compiled, which is all a blueprint brought in by another is asked for now. Its
+	 * class carries every function, event and dispatcher it has, which is what anything calling it
+	 * needs; what each of them does is laid out at the end of the run. */
+	if (bDeclareOnly) return 0;
 
 	for (const TSharedPtr<FBytecodeGraph>& Builder : Builders) {
 		Placed += Builder->Build();

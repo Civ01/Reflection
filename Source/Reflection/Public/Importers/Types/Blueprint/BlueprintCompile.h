@@ -34,4 +34,14 @@ struct REFLECTION_API FBlueprintSettle {
 	/* Asks for a blueprint to be read again once the run is over, because something it calls was not
 	 * there yet when its graphs were laid out */
 	static void Reread(UBlueprint* Blueprint);
+
+	/* Whether a blueprint being imported now should only declare what it is, and have its graphs
+	 * laid out once the run is over. True for one brought in by another while a run is going. */
+	static bool ShouldDefer();
+
+	/* Its graphs are laid out at the end of the run, after everything it was brought in with */
+	static void Defer(UBlueprint* Blueprint);
+
+	/* Laid out in full after all, so there is nothing left to do for it at the end */
+	static void Undefer(UBlueprint* Blueprint);
 };
