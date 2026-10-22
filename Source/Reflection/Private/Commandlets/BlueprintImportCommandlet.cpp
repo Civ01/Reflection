@@ -110,6 +110,13 @@ int32 UBlueprintImportCommandlet::Main(const FString& Params) {
 		UE_LOG(LogBlueprintImport, Display, TEXT("leaving the graphs empty"));
 	}
 
+	/* The graphs declared and left empty: every function, event and dispatcher, with nothing in them */
+	if (FParse::Param(*Params, TEXT("stubs"))) {
+		GetSettings()->AssetSettings.BlueprintCodeAsStubs = true;
+
+		UE_LOG(LogBlueprintImport, Display, TEXT("declaring the graphs as stubs"));
+	}
+
 	/* The runtime carries the project name a cloud path is turned into an editor one with, and
 	 * nothing has fetched it in a run with no editor around it */
 	Cloud::EnsureMetadataBlocking();

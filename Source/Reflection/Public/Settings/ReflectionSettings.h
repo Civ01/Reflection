@@ -71,6 +71,33 @@ public:
 	/* Whether a blueprint gets its graphs. Off, everything else about it comes across and the graphs are left empty. */
 	UPROPERTY(EditAnywhere, DisplayName = "Import Blueprint Code", Config, Category = Settings)
 	bool ImportBlueprintCode = true;
+
+	/* Whether a blueprint's code comes across as stubs: every function, event and dispatcher it has,
+	 * with what each takes and gives back, and nothing inside them. A stub always compiles, which is
+	 * what a blueprint kept only to be referenced by others needs: anything calling into it, reading
+	 * it or deriving from it compiles against exactly what the game's own class has. */
+	UPROPERTY(EditAnywhere, DisplayName = "Blueprint Code As Stubs", Config, Category = Settings, meta = (EditCondition = "ImportBlueprintCode"))
+	bool BlueprintCodeAsStubs = false;
+
+	/* Only blueprints under these folders come across as stubs, the rest get their code read back.
+	 * Left empty, Blueprint Code As Stubs covers every blueprint. Written as /Game/Some/Folder. */
+	UPROPERTY(EditAnywhere, DisplayName = "Stub Only Under", Config, Category = Settings, meta = (EditCondition = "ImportBlueprintCode && BlueprintCodeAsStubs"))
+	TArray<FString> StubFolders;
+
+	/* Whether a blueprint in this package comes across as stubs */
+	bool IsStubbed(const FString& PackageName) const {
+		if (!ImportBlueprintCode || !BlueprintCodeAsStubs) return false;
+		if (StubFolders.Num() == 0) return true;
+
+		for (const FString& Folder : StubFolders) {
+			FString Under = Folder.TrimStartAndEnd();
+			Under.RemoveFromEnd(TEXT("/"));
+
+			if (!Under.IsEmpty() && (PackageName == Under || PackageName.StartsWith(Under + TEXT("/")))) return true;
+		}
+
+		return false;
+	}
 };
 
 /* Reconstruction Toolkit for Unreal Engine */
