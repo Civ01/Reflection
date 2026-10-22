@@ -61,6 +61,7 @@
 #include "K2Node_Self.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
+#include "K2Node_VariableSetRef.h"
 
 namespace {
 	/* One struct by name, wherever it lives.
@@ -373,6 +374,22 @@ UFunction* FBytecodeGraph::FindFunctionOn(const UClass* Class, const FString& Me
 	if (Class == nullptr || Member.IsEmpty()) return nullptr;
 
 	if (UFunction* Found = Class->FindFunctionByName(*Member)) return Found;
+
+	/* A blueprint's class only carries what it was last compiled with. A function its graphs
+	 * declare is on the skeleton the editor keeps as soon as it is declared, and on the class the
+	 * blueprint compiles to only once that compile has run: a call to it on another instance of
+	 * the same blueprint, or on one brought in a moment ago, finds nothing on the class the value
+	 * holds. The blueprint behind the class has both. */
+	if (const UBlueprint* Behind = ::Cast<UBlueprint>(Class->ClassGeneratedBy)) {
+		const UClass* Skeleton = Behind->SkeletonGeneratedClass.Get();
+		const UClass* Generated = Behind->GeneratedClass.Get();
+
+		for (const UClass* Other : { Skeleton, Generated }) {
+			if (Other == nullptr || Other == Class) continue;
+
+			if (UFunction* Found = Other->FindFunctionByName(*Member)) return Found;
+		}
+	}
 
 	/* Called by a name the engine has since moved on from. What a float math node was called is
 	 * what a double one is called now, and the engine is the one that knows which became which,
@@ -1304,6 +1321,31 @@ const UClass* FBytecodeGraph::ClassNamedBy(const FUObjectJsonValueExport& Expres
 }
 
 const UClass* FBytecodeGraph::ClassDeclaredBy(const FUObjectJsonValueExport& Expression) {
+	/* An element of an array, which is declared as whatever the array holds */
+	if (MacroReading::TokenOf(Expression) == TEXT("EX_ArrayGetByRef") && Expression.Has(TEXT("ArrayVariable"))) {
+		const FUObjectJsonValueExport Array = Expression.GetObject(TEXT("ArrayVariable"));
+
+		if (!Array.Has(TEXT("Variable"))) return nullptr;
+
+		const FUObjectJsonValueExport Held = Array.GetObject(TEXT("Variable"));
+
+		if (!Held.Has(TEXT("Property"))) return nullptr;
+
+		const FUObjectJsonValueExport Listed = Held.GetObject(TEXT("Property"));
+
+		if (!Listed.Has(TEXT("Inner"))) return nullptr;
+
+		/* Asked again as a plain variable of that element's type */
+		const TSharedPtr<FJsonObject> Wrapped = MakeShared<FJsonObject>();
+		Wrapped->SetObjectField(TEXT("Property"), Listed.GetObject(TEXT("Inner")).JsonObject);
+
+		const TSharedPtr<FJsonObject> Element = MakeShared<FJsonObject>();
+		Element->SetStringField(TEXT("Token"), TEXT("EX_LocalVariable"));
+		Element->SetObjectField(TEXT("Variable"), Wrapped);
+
+		return ClassDeclaredBy(FUObjectJsonValueExport(Element));
+	}
+
 	if (!MacroReading::TokenOf(Expression).EndsWith(TEXT("Variable")) || !Expression.Has(TEXT("Variable"))) return nullptr;
 
 	const FUObjectJsonValueExport Held = Expression.GetObject(TEXT("Variable"));
@@ -2258,7 +2300,10 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 				On = const_cast<UClass*>(FindClassByType(Owner));
 			}
 
-			if (!Name.IsEmpty() && On != nullptr && Target.Pin != nullptr) {
+			/* Read off something worked out further on as well, which is only a name until then:
+			 * left to fall through, the member is read off the blueprint itself instead, which
+			 * either has nothing of that name or has something else */
+			if (!Name.IsEmpty() && On != nullptr && (Target.Pin != nullptr || !Target.Wanted.IsEmpty())) {
 				UK2Node_VariableGet* Node = AddNode<UK2Node_VariableGet>();
 
 				Node->VariableReference.SetExternalMember(*Name, On);
@@ -2287,7 +2332,7 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 					if (::Cast<UBlueprintGeneratedClass>(On) != nullptr) bWorthRereading = true;
 				}
 
-				Connect(Target.Pin, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
+				Give(Target, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
 
 				Value.Pin = Node->FindPin(*Name, EGPD_Output);
 
@@ -3490,13 +3535,14 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 					? Read(Variable.GetObject(TEXT("ObjectExpression")))
 					: FValue();
 
-				if (Target.Pin != nullptr) {
+				/* Or onto something worked out further on, which is wired once it is laid down */
+				if (Target.Pin != nullptr || !Target.Wanted.IsEmpty()) {
 					UK2Node_VariableSet* Node = AddNode<UK2Node_VariableSet>();
 
 					Node->VariableReference.SetExternalMember(*Member, On);
 					Node->AllocateDefaultPins();
 
-					Connect(Target.Pin, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
+					Give(Target, Node->FindPin(UEdGraphSchema_K2::PN_Self, EGPD_Input));
 
 					if (UEdGraphPin* Pin = Node->FindPin(*Member, EGPD_Input)) {
 						Give(Expression, Pin);
@@ -3529,6 +3575,42 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 			return true;
 		}
 
+		/* Written into what it was handed by reference, which is not an answer at all.
+		 *
+		 * A parameter taken by reference is written the same way an output is, and only the
+		 * function's entry says which it is: an output is a pin of the Return, one taken by
+		 * reference is a pin of the entry, marked as a reference. Read as an answer there is no
+		 * Return pin of that name to give it to, and the write is lost. The graph says it with
+		 * Set By-Ref Var, onto the entry's pin. */
+		if (MacroReading::TokenOf(Variable) == TEXT("EX_LocalOutVariable") && !Name.IsEmpty() && FindAnswer(Name) == nullptr) {
+			UEdGraphPin* Handed = nullptr;
+
+			for (UEdGraphNode* Each : Graph->Nodes) {
+				if (Each == nullptr || !Each->IsA<UK2Node_FunctionEntry>()) continue;
+
+				if (UEdGraphPin* Takes = Each->FindPin(*Name, EGPD_Output); Takes != nullptr && Takes->PinType.bIsReference) Handed = Takes;
+
+				break;
+			}
+
+			if (Handed != nullptr) {
+				UK2Node_VariableSetRef* Sets = AddNode<UK2Node_VariableSetRef>();
+
+				Sets->AllocateDefaultPins();
+
+				/* The reference first, since what it holds is what the value pin learns to take */
+				Connect(Handed, Sets->GetTargetPin());
+
+				Give(Expression, Sets->GetValuePin());
+
+				ChainExecution(Sets);
+
+				Placed++;
+
+				return true;
+			}
+		}
+
 		/* Written straight into what the function hands back, which is a Return */
 		if (MacroReading::TokenOf(Variable) == TEXT("EX_LocalOutVariable") && !Name.IsEmpty() && !Answered.Contains(Name)) {
 			return AnswerHere(Name, Expression);
@@ -3542,6 +3624,11 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 				 * hold yet, so whoever reads this one is pointed at that one instead, and is wired
 				 * to it once it is laid down. */
 				Aliases.Add(Name, Expression.Wanted);
+			} else if (!Expression.Literal.IsEmpty() && (Constants.Contains(Name) || IsCompilerLocal(Name))) {
+				/* Or a local the compiler made for one pin, which carries a value as well when what
+				 * it was worked out from turned out to be one: a constant cast to another width on the
+				 * way to a call is the same constant at that call */
+				Carried.Add(Name, Expression.Literal);
 			} else if (Constants.Contains(Name) && !Expression.Literal.IsEmpty()) {
 				/* Stretch as what it says rather than laid down as a node. Whoever reads it is a pin
 				 * that was given this value, and a pin holds its own value. */
