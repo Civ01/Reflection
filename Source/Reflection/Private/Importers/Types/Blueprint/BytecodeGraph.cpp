@@ -61,6 +61,7 @@
 #include "K2Node_Self.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
+#include "K2Node_VariableSetRef.h"
 
 namespace {
 	/* One struct by name, wherever it lives.
@@ -3568,6 +3569,42 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 		if (!Name.IsEmpty() && Answered.FindRef(MacroReading::NamedProperty(
 			Statement.GetObject(TEXT("Expression")).GetObject(TEXT("Variable")))) == Name) {
 			return true;
+		}
+
+		/* Written into what it was handed by reference, which is not an answer at all.
+		 *
+		 * A parameter taken by reference is written the same way an output is, and only the
+		 * function's entry says which it is: an output is a pin of the Return, one taken by
+		 * reference is a pin of the entry, marked as a reference. Read as an answer there is no
+		 * Return pin of that name to give it to, and the write is lost. The graph says it with
+		 * Set By-Ref Var, onto the entry's pin. */
+		if (MacroReading::TokenOf(Variable) == TEXT("EX_LocalOutVariable") && !Name.IsEmpty() && FindAnswer(Name) == nullptr) {
+			UEdGraphPin* Handed = nullptr;
+
+			for (UEdGraphNode* Each : Graph->Nodes) {
+				if (Each == nullptr || !Each->IsA<UK2Node_FunctionEntry>()) continue;
+
+				if (UEdGraphPin* Takes = Each->FindPin(*Name, EGPD_Output); Takes != nullptr && Takes->PinType.bIsReference) Handed = Takes;
+
+				break;
+			}
+
+			if (Handed != nullptr) {
+				UK2Node_VariableSetRef* Sets = AddNode<UK2Node_VariableSetRef>();
+
+				Sets->AllocateDefaultPins();
+
+				/* The reference first, since what it holds is what the value pin learns to take */
+				Connect(Handed, Sets->GetTargetPin());
+
+				Give(Expression, Sets->GetValuePin());
+
+				ChainExecution(Sets);
+
+				Placed++;
+
+				return true;
+			}
 		}
 
 		/* Written straight into what the function hands back, which is a Return */
