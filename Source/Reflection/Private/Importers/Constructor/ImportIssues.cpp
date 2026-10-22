@@ -173,6 +173,10 @@ void FImportIssues::Push(const FString& Name, const FString& Path, const FString
 	GStack.Push(Asset);
 }
 
+int32 FImportIssues::Depth() {
+	return GStack.Num();
+}
+
 void FImportIssues::Pop() {
 	if (GStack.Num() > 0) {
 		GStack.Pop();

@@ -146,6 +146,12 @@ namespace {
 	/* Settling compiles through the same guard, which would only put each one back on the list */
 	bool bSettleRunning = false;
 
+	/* Brought in by another blueprint and only declared, waiting to be laid out */
+	TArray<TWeakObjectPtr<UBlueprint>> GSettleDeferred;
+
+	/* Between a run starting and it settling, which is the only time anything deferred gets done */
+	bool bSettleRunActive = false;
+
 	/* Compiles everything queued in one go, with the same guard a single compile has */
 	bool AttemptFlush() {
 #if PLATFORM_WINDOWS && !PLATFORM_SEH_EXCEPTIONS_DISABLED
@@ -236,6 +242,25 @@ namespace {
 void FBlueprintSettle::Begin() {
 	GSettleTracked.Reset();
 	GSettleReread.Reset();
+	GSettleDeferred.Reset();
+
+	bSettleRunActive = true;
+}
+
+bool FBlueprintSettle::ShouldDefer() {
+	return bSettleRunActive && !bSettleRunning && FImportIssues::Depth() > 1;
+}
+
+void FBlueprintSettle::Defer(UBlueprint* Blueprint) {
+	if (Blueprint == nullptr || bSettleRunning) return;
+
+	GSettleDeferred.AddUnique(Blueprint);
+}
+
+void FBlueprintSettle::Undefer(UBlueprint* Blueprint) {
+	if (Blueprint == nullptr) return;
+
+	GSettleDeferred.Remove(Blueprint);
 }
 
 void FBlueprintSettle::Reread(UBlueprint* Blueprint) {
@@ -258,8 +283,46 @@ int32 FBlueprintSettle::Settle() {
 
 	TGuardValue<bool> Guard(bSettleRunning, true);
 
+	bSettleRunActive = false;
+
 	TSet<UBlueprint*> Recompiled;
 	int32 Settled = 0;
+
+	/* Laid out now, everything that was only declared on the way in.
+	 *
+	 * A blueprint brought in by another one is brought in while that one is half made: a character
+	 * reaches its widgets while it is still reading its own variables, before it has a single
+	 * function or dispatcher of its own. Laid out then, every call a widget makes into it, or into
+	 * the function library that is waiting on it in turn, comes out as a node with nothing behind
+	 * it and a compile that says so, and the whole of it is read a second time at the end anyway.
+	 *
+	 * So it only declared what it is, its variables, functions, events and dispatchers, and its
+	 * graphs are laid out here, once, when every blueprint the run touched has declared itself. In
+	 * the order they were brought in, which puts what was needed first ahead of what needed it. */
+	{
+		TArray<TWeakObjectPtr<UBlueprint>> Deferred = MoveTemp(GSettleDeferred);
+		GSettleDeferred.Reset();
+
+		int32 Laid = 0;
+
+		for (const TWeakObjectPtr<UBlueprint>& Weak : Deferred) {
+			UBlueprint* Blueprint = Weak.Get();
+
+			if (Blueprint == nullptr || Blueprint->GetOutermost()->HasAnyFlags(RF_Transient)) continue;
+
+			/* Read once here is read once: asking to read it again as well would only repeat it */
+			GSettleReread.Remove(Blueprint);
+
+			if (TToolImportFromPath::Import(Blueprint->GetOutermost()->GetName())) Laid++;
+
+			GSettleTracked.Remove(Blueprint);
+			Tracked.AddUnique(Blueprint);
+		}
+
+		if (Deferred.Num() > 0) {
+			UE_LOG(LogReflection, Display, TEXT("Settling: %d of %d blueprint(s) brought in along the way had their graphs laid out"), Laid, Deferred.Num());
+		}
+	}
 
 	/* Read again first, once and in the order they asked.
 	 *
