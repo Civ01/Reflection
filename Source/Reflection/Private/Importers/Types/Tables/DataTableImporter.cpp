@@ -31,6 +31,23 @@ bool IDataTableImporter::Import() {
 #else
 	UScriptStruct* TableRowStruct = FindObject<UScriptStruct>(ANY_PACKAGE, *TableStruct); {
 #endif
+		/* A struct the game declared as an asset of its own, which is only here once something has
+		 * brought it in. Looked for by name it is missed every time the table comes first, which is
+		 * every time: a table is what names its struct, never the other way round. So it is asked
+		 * for by the reference the table carries, which loads it, or reflects it where it was never
+		 * brought across. */
+		if (TableRowStruct == nullptr) {
+			const TSharedPtr<FJsonObject> RowStructReference = GetAssetData()->GetObjectField(TEXT("RowStruct"));
+			FString Path;
+
+			if (RowStructReference.IsValid() && RowStructReference->TryGetStringField(TEXT("ObjectPath"), Path) && !Path.StartsWith(TEXT("/Script/"))) {
+				TObjectPtr<UScriptStruct> Loaded;
+				LoadExport<UScriptStruct>(&RowStructReference, Loaded);
+
+				TableRowStruct = Loaded.Get();
+			}
+		}
+
 		
 		if (TableRowStruct == nullptr) {
 			FImportIssues::Report(
