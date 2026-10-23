@@ -21,6 +21,27 @@ REFLECTION_API UBlueprint* CreateBlueprintGuarded(UClass* ParentClass, UObject* 
  * and the weapon compiles against a character with none of its variables or dispatchers yet. Each one
  * compiled during a run is remembered, and once the run is over the ones left with errors or warnings have their
  * nodes refreshed and are compiled again against everything that has finished since. */
+/* A blueprint whose import is under way, for as long as this is alive.
+ *
+ * Compiling a blueprint lays out again every node in every blueprint that depends on it, and has
+ * them compiled too. A blueprint that brings another in while it is half built a character
+ * reaching its widgets, a GUI reaching the widgets it spawns is one of those, and the import
+ * laying it out is holding on to its nodes and pins the whole time. Laid out again underneath it,
+ * every one of those is gone, and the import goes on with them and stops the editor.
+ *
+ * So while one is under construction, compiling anything else leaves it out of the dependents. It
+ * is compiled when its own import gets there, and again when the run settles. */
+struct REFLECTION_API FBlueprintUnderConstruction {
+	explicit FBlueprintUnderConstruction(UBlueprint* Blueprint);
+	~FBlueprintUnderConstruction();
+
+	FBlueprintUnderConstruction(const FBlueprintUnderConstruction&) = delete;
+	FBlueprintUnderConstruction& operator=(const FBlueprintUnderConstruction&) = delete;
+
+private:
+	TWeakObjectPtr<UBlueprint> Held;
+};
+
 struct REFLECTION_API FBlueprintSettle {
 	/* Forgets what an earlier run left behind */
 	static void Begin();

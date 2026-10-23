@@ -137,6 +137,9 @@ bool IAnimationBlueprintImporter::Import() {
 
 	if (!AnimBlueprint) return false;
 
+	/* Anything compiled while this is being built leaves it be */
+	const FBlueprintUnderConstruction Building(AnimBlueprint);
+
 	const TSharedPtr<FJsonObject> RootAnimNodeDefaults = GetExportStartingWith("Default__", "Name", GetContainer()->JsonObjects);
 	if (!RootAnimNodeDefaults.IsValid()) return false;
 	

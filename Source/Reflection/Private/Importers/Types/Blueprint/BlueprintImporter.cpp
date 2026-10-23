@@ -125,6 +125,9 @@ bool IBlueprintImporter::Import() {
 	Blueprint = UBlueprint::GetBlueprintFromClass(BlueprintGeneratedClass);
 	if (!Blueprint) return false;
 
+	/* Anything compiled while this is being built leaves it be */
+	const FBlueprintUnderConstruction Building(Blueprint);
+
 	/* Deserialize Generated Class (blueprint defaults) */
 	UBlueprintGeneratedClass* GeneratedClass = Cast<UBlueprintGeneratedClass>(Blueprint->GeneratedClass);
 	FUObjectExport* ClassDefaultObjectExport = GetClassDefaultObject(GetContainer(), GetAssetDataAsValue());
