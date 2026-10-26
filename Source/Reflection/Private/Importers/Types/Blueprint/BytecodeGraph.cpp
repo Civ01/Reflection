@@ -55,6 +55,7 @@
 #include "K2Node_AssignmentStatement.h"
 #include "K2Node_MathExpression.h"
 #include "K2Node_MakeStruct.h"
+#include "K2Node_SetFieldsInStruct.h"
 #include "Kismet/KismetTextLibrary.h"
 #include "K2Node_Select.h"
 #include "K2Node_Timeline.h"
@@ -1167,13 +1168,21 @@ bool FBytecodeGraph::KeepsTemporary(const FString& Name) const {
 }
 
 UEdGraphPin* FBytecodeGraph::Temporary(const FString& Name, const FUObjectJsonValueExport& Property) {
-	if (const TWeakObjectPtr<UK2Node_TemporaryVariable>* Made = Temporaries.Find(Name); Made != nullptr && Made->IsValid()) {
+	/* Still in the graph, since a node taken out of it is still a live object until it is collected,
+	 * and a wire to it is a wire to nothing anybody will see */
+	if (const TWeakObjectPtr<UK2Node_TemporaryVariable>* Made = Temporaries.Find(Name); Made != nullptr && Made->IsValid() && Graph->Nodes.Contains(Made->Get())) {
 		return (*Made)->GetVariablePin();
 	}
 
 	FEdGraphPinType Type;
 
-	if (!TypeOfProperty(Property, Type, Container)) return nullptr;
+	if (!TypeOfProperty(Property, Type, Container)) {
+		UE_LOG(LogReflectionBytecode, Warning, TEXT("\"%s\" is kept as a Local, and its type could not be read"), *Name);
+
+		Unhandled.AddUnique(FString::Printf(TEXT("the Local \"%s\", whose type could not be read"), *Name));
+
+		return nullptr;
+	}
 
 	UK2Node_TemporaryVariable* Node = AddNode<UK2Node_TemporaryVariable>();
 
@@ -2042,10 +2051,24 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 		/* What is looked at, wired first: the node works out what kind of thing it is picking
 		 * between from this, and lays its case pins out again to match */
 		if (UEdGraphPin* Index = Node->GetIndexPin()) {
-			const FValue Looked = Read(Expression.GetObject(TEXT("IndexTerm")));
+			const FUObjectJsonValueExport Term = Expression.GetObject(TEXT("IndexTerm"));
+			const FValue Looked = Read(Term);
 
 			if (Looked.Pin != nullptr) Connect(Looked.Pin, Index);
 			else if (!Looked.Literal.IsEmpty()) ApplyLiteral(Index, Looked.Literal);
+			else if (!Looked.Wanted.IsEmpty()) {
+				/* Worked out further down the list, which wires it only at the end. The node has to
+				 * know what it picks by now, so it is told what the script says the index is. */
+				FEdGraphPinType Type;
+
+				if (Term.Has(TEXT("Variable")) && Term.GetObject(TEXT("Variable")).Has(TEXT("Property"))
+					&& TypeOfProperty(Term.GetObject(TEXT("Variable")).GetObject(TEXT("Property")), Type, Container)) {
+					Index->PinType = Type;
+					Node->PinTypeChanged(Index);
+				}
+
+				Give(Looked, Node->GetIndexPin());
+			}
 		}
 
 		/* Laid out again now it knows what it is looking at.
@@ -2990,6 +3013,16 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 				if (const FString Named = MacroReading::NamedProperty(Variable); !Named.IsEmpty()) {
 					Locals.Add(Named, Pin);
 				}
+
+				/* A pin that takes whatever it is given, the way a data table row comes out, only learns
+				 * what it is from what it is wired to. The local the compiler wrote it into already says,
+				 * so the pin is told outright: left a wildcard, nothing reading it would fit and the
+				 * compiler stops on a type it cannot work out. */
+				if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Wildcard && Variable.Has(TEXT("Property"))) {
+					if (FEdGraphPinType Stated; TypeOfProperty(Variable.GetObject(TEXT("Property")), Stated, Container)) {
+						Pin->PinType = Stated;
+					}
+				}
 			}
 
 			continue;
@@ -3390,6 +3423,68 @@ bool FBytecodeGraph::FillStruct(const FUObjectJsonValueExport& Statement, const 
 
 	if (UEdGraphPin** Already = Locals.Find(Into); Already != nullptr && *Already != nullptr) {
 		Node = Cast<UK2Node_MakeStruct>((*Already)->GetOwningNode());
+
+		/* A struct that already holds something else, changed member by member, is Set Members.
+		 *
+		 * The compiler writes that node as writes straight into the struct it was handed, followed
+		 * by a copy into its own output. Read as a struct being made, the value that was handed in
+		 * is thrown away and replaced by a Make with only the changed members: a font read from a
+		 * function and given another material comes back as a font made from nothing, with a
+		 * material and none of the rest. */
+		if (Node == nullptr || Node->IsA<UK2Node_SetFieldsInStruct>()) {
+			UK2Node_SetFieldsInStruct* Sets = Cast<UK2Node_SetFieldsInStruct>((*Already)->GetOwningNode());
+
+			if (Sets == nullptr) {
+				Sets = AddNode<UK2Node_SetFieldsInStruct>();
+
+				Sets->StructType = Kind;
+				Sets->bMadeAfterOverridePinRemoval = true;
+				Sets->AllocateDefaultPins();
+
+				/* Only what was written is set, and a member left hidden keeps what it was handed */
+				for (FOptionalPinFromProperty& Shown : Sets->ShowPinForProperties) Shown.bShowPin = false;
+
+				Sets->ReconstructNode();
+
+				Connect(*Already, Sets->FindPin(TEXT("StructRef"), EGPD_Input));
+
+				ChainExecution(Sets);
+
+				Placed++;
+
+				if (UEdGraphPin* Out = Sets->FindPin(TEXT("StructOut"), EGPD_Output)) Locals.Add(Into, Out);
+			}
+
+			bool bShown = false;
+
+			for (FOptionalPinFromProperty& Shown : Sets->ShowPinForProperties) {
+				if (Shown.PropertyName != FName(*Named)) continue;
+
+				if (!Shown.bShowPin) {
+					Shown.bShowPin = true;
+					bShown = true;
+				}
+
+				break;
+			}
+
+			/* Laid out again for the new pin, which keeps the wires it has by name */
+			if (bShown) {
+				Sets->ReconstructNode();
+
+				if (UEdGraphPin* Out = Sets->FindPin(TEXT("StructOut"), EGPD_Output)) Locals.Add(Into, Out);
+			}
+
+			UEdGraphPin* Takes = Sets->FindPin(*Named, EGPD_Input);
+
+			if (Takes == nullptr) return false;
+
+			if (Expression.Pin != nullptr) Connect(Expression.Pin, Takes);
+			else if (!Expression.Literal.IsEmpty()) ApplyLiteral(Takes, Expression.Literal);
+			else Give(Expression, Takes);
+
+			return true;
+		}
 	}
 
 	if (Node == nullptr) {
@@ -4860,10 +4955,9 @@ bool FBytecodeGraph::PlaceMacro(const FMacroMatch& Match) {
 	/* What the caller wrote for the macro's inputs */
 	for (const TPair<FName, FUObjectJsonValueExport>& Input : Match.Inputs) {
 		if (UEdGraphPin* Pin = MacroPin(Node, Input.Key, EGPD_Input)) {
-			const FValue Given = Read(Input.Value);
-
-			if (Given.Pin != nullptr) Connect(Given.Pin, Pin);
-			else if (!Given.Literal.IsEmpty()) ApplyLiteral(Pin, Given.Literal);
+			/* Given rather than connected, so an input worked out further down the list (an array
+			 * a For Each walks, filled by a stretch read later) is still wired once it exists */
+			Give(Read(Input.Value), Pin);
 		}
 	}
 
@@ -5526,10 +5620,7 @@ int32 FBytecodeGraph::Build() {
 
 				if (UEdGraphPin* Pin = MacroPin(Waiting.Value, Late.Key, EGPD_Input)) {
 					if (Pin->LinkedTo.Num() == 0 && Pin->DefaultValue.IsEmpty()) {
-						const FValue Given = Read(Late.Value);
-
-						if (Given.Pin != nullptr) Connect(Given.Pin, Pin);
-						else if (!Given.Literal.IsEmpty()) ApplyLiteral(Pin, Given.Literal);
+						Give(Read(Late.Value), Pin);
 					}
 				}
 			}
