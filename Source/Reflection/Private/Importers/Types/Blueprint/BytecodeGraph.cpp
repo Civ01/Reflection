@@ -3764,6 +3764,8 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 				UE_LOG(LogReflectionBytecode, Warning, TEXT("the Assign onto \"%s\" could not be wired to its Local"), *Name);
 			}
 
+			AssignsOntoLocals.Add(FAssignOntoLocal{ Node, Name, Held.Has(TEXT("Property")) ? Held.GetObject(TEXT("Property")) : Held });
+
 			Give(Expression, Node->GetValuePin());
 
 			ChainExecution(Node);
@@ -5140,6 +5142,16 @@ void FBytecodeGraph::Arrange() {
 		}
 	};
 
+	/* What the graph already held before a stretch was laid into it stays where its owner put it,
+	 * and what the stretch worked out is laid out to the left of the node it feeds */
+	for (UEdGraphNode* Node : HadBefore) {
+		if (Node != nullptr) Settled.Add(Node);
+	}
+
+	for (UEdGraphNode* Node : HadBefore) {
+		if (Node != nullptr && Graph->Nodes.Contains(Node)) Feeders(Node, Node->NodePosX, Node->NodePosY);
+	}
+
 	/* Every way into the graph starts a run of its own, laid out below the one before it. A
 	 * function is entered in one place, its entry node; the event graph once per event. */
 	int32 Line = 0;
@@ -5356,7 +5368,26 @@ int32 FBytecodeGraph::Build() {
 		FindMacros();
 	}
 
-	Clear();
+	/* A stretch is laid into a graph that is somebody else's.
+	 *
+	 * The rest of a blueprint's graphs are this run's to write, and emptied first so a second import
+	 * does not lay a second copy over the first. A stretch is a few statements working out one input
+	 * of a node that already stands in an animation graph, a state or a transition rule, and that
+	 * graph is full of what its owner put there. Emptied, the whole animation graph goes: every pose
+	 * and blend in it, leaving the output pose (which cannot be deleted) with nothing wired to it
+	 * and the stretch's own reads standing beside it.
+	 *
+	 * So a stretch keeps what it found, and leaves it where it was: what it found is neither laid
+	 * out again nor taken out for feeding nobody, which only its own nodes are answerable for. */
+	HadBefore.Reset();
+
+	if (Stretch.Num() > 0) {
+		for (UEdGraphNode* Node : Graph->Nodes) {
+			if (Node != nullptr) HadBefore.Add(Node);
+		}
+	} else {
+		Clear();
+	}
 
 	/* What the graph was handed comes out of whatever it is entered through, so a read of a
 	 * parameter is a read of that pin rather than of anything the graph keeps of its own.
@@ -5890,6 +5921,43 @@ int32 FBytecodeGraph::Build() {
 		UE_LOG(LogReflectionBytecode, Display, TEXT("entry \"%s\" carries %d link(s) out of it"), *Node->GetName(), Then != nullptr ? Then->LinkedTo.Num() : -1);
 	}
 
+	/* Every Assign still onto its Local.
+	 *
+	 * Wiring the value an Assign takes makes the node retype both of its pins to match, and it lets
+	 * go of whatever its variable pin held if the two no longer agree. A value wired late, once the
+	 * rest of the function is laid out, can take the variable away like that after the Assign was
+	 * checked. Nothing the compiler accepts has an Assign without a variable, so one left without is
+	 * put back on its Local, forced rather than asked, and said out loud with what the value turned
+	 * out to be so the disagreement can be found. */
+	for (const FAssignOntoLocal& Onto : AssignsOntoLocals) {
+		UK2Node_AssignmentStatement* Assigns = Onto.Node.Get();
+
+		if (Assigns == nullptr || !Graph->Nodes.Contains(Assigns)) continue;
+
+		UEdGraphPin* VariableIn = Assigns->GetVariablePin();
+
+		if (VariableIn == nullptr || VariableIn->LinkedTo.Num() > 0) continue;
+
+		UEdGraphPin* Back = Temporary(Onto.Name, Onto.Property);
+
+		const UEdGraphPin* ValueIn = Assigns->GetValuePin();
+		const UEdGraphPin* Fed = ValueIn != nullptr && ValueIn->LinkedTo.Num() > 0 ? ValueIn->LinkedTo[0] : nullptr;
+
+		UE_LOG(LogReflectionBytecode, Warning, TEXT("the Assign onto \"%s\" lost its Local after it was wired (value from \"%s\" on \"%s\", %s), so it was put back"),
+			*Onto.Name,
+			Fed != nullptr ? *Fed->PinName.ToString() : TEXT("nothing"),
+			Fed != nullptr ? *Fed->GetOwningNode()->GetName() : TEXT("nothing"),
+			Fed != nullptr ? *UEdGraphSchema_K2::TypeToText(Fed->PinType).ToString() : TEXT("no type"));
+
+		if (Back == nullptr) continue;
+
+		VariableIn->PinType = Back->PinType;
+		VariableIn->PinType.bIsReference = false;
+		VariableIn->PinType.bIsConst = false;
+
+		VariableIn->MakeLinkTo(Back);
+	}
+
 	/* What works something out for nobody.
 	 *
 	 * A node with no way in and no way out and nothing reading what it hands over does nothing at
@@ -5911,7 +5979,7 @@ int32 FBytecodeGraph::Build() {
 		for (int32 At = Graph->Nodes.Num() - 1; At >= 0; --At) {
 			UEdGraphNode* One = Graph->Nodes[At];
 
-			if (One == nullptr || !One->CanUserDeleteNode()) continue;
+			if (One == nullptr || !One->CanUserDeleteNode() || HadBefore.Contains(One)) continue;
 			if (One->IsA<UK2Node_Event>() || One->IsA<UK2Node_FunctionEntry>() || One->IsA<UK2Node_FunctionResult>() || One->IsA<UK2Node_Timeline>()) continue;
 
 			bool bRuns = false;

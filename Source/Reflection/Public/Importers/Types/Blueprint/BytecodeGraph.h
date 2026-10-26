@@ -436,6 +436,19 @@ private:
 	/* The Local node each kept scratch was made as */
 	TMap<FString, TWeakObjectPtr<class UK2Node_TemporaryVariable>> Temporaries;
 
+	/* Each Assign onto a kept scratch, with the scratch it assigns and how that scratch is described,
+	 * checked once everything is wired in case a later wire took its variable away */
+	struct FAssignOntoLocal {
+		TWeakObjectPtr<class UK2Node_AssignmentStatement> Node;
+		FString Name;
+		FUObjectJsonValueExport Property;
+	};
+
+	TArray<FAssignOntoLocal> AssignsOntoLocals;
+
+	/* What a graph held before a stretch was laid into it, which the stretch leaves alone */
+	TSet<UEdGraphNode*> HadBefore;
+
 	/* What each of those carries, once the statement that writes it has been read */
 	TMap<FString, FString> Carried;
 
