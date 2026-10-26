@@ -3432,48 +3432,34 @@ bool FBytecodeGraph::FillStruct(const FUObjectJsonValueExport& Statement, const 
 		 * function and given another material comes back as a font made from nothing, with a
 		 * material and none of the rest. */
 		if (Node == nullptr || Node->IsA<UK2Node_SetFieldsInStruct>()) {
-			UK2Node_SetFieldsInStruct* Sets = Cast<UK2Node_SetFieldsInStruct>((*Already)->GetOwningNode());
+			/* One node per member written, each taking what the last one handed out.
+			 *
+			 * Showing another member on a node already laid out means laying it out again, and that
+			 * throws away every pin it had. Anything still holding one (a value waiting to be wired
+			 * further down the list, another local read off it) is then holding a pin the editor
+			 * has already binned, and the first wire made to it takes the editor down. A node
+			 * nobody has seen yet is laid out once, with just the one member showing, before
+			 * anything can hold on to it. */
+			UK2Node_SetFieldsInStruct* Sets = AddNode<UK2Node_SetFieldsInStruct>();
 
-			if (Sets == nullptr) {
-				Sets = AddNode<UK2Node_SetFieldsInStruct>();
+			Sets->StructType = Kind;
+			Sets->bMadeAfterOverridePinRemoval = true;
+			Sets->AllocateDefaultPins();
 
-				Sets->StructType = Kind;
-				Sets->bMadeAfterOverridePinRemoval = true;
-				Sets->AllocateDefaultPins();
-
-				/* Only what was written is set, and a member left hidden keeps what it was handed */
-				for (FOptionalPinFromProperty& Shown : Sets->ShowPinForProperties) Shown.bShowPin = false;
-
-				Sets->ReconstructNode();
-
-				Connect(*Already, Sets->FindPin(TEXT("StructRef"), EGPD_Input));
-
-				ChainExecution(Sets);
-
-				Placed++;
-
-				if (UEdGraphPin* Out = Sets->FindPin(TEXT("StructOut"), EGPD_Output)) Locals.Add(Into, Out);
-			}
-
-			bool bShown = false;
-
+			/* Only what was written is set, and a member left hidden keeps what it was handed */
 			for (FOptionalPinFromProperty& Shown : Sets->ShowPinForProperties) {
-				if (Shown.PropertyName != FName(*Named)) continue;
-
-				if (!Shown.bShowPin) {
-					Shown.bShowPin = true;
-					bShown = true;
-				}
-
-				break;
+				Shown.bShowPin = Shown.PropertyName == FName(*Named);
 			}
 
-			/* Laid out again for the new pin, which keeps the wires it has by name */
-			if (bShown) {
-				Sets->ReconstructNode();
+			Sets->ReconstructNode();
 
-				if (UEdGraphPin* Out = Sets->FindPin(TEXT("StructOut"), EGPD_Output)) Locals.Add(Into, Out);
-			}
+			Connect(*Already, Sets->FindPin(TEXT("StructRef"), EGPD_Input));
+
+			ChainExecution(Sets);
+
+			Placed++;
+
+			if (UEdGraphPin* Out = Sets->FindPin(TEXT("StructOut"), EGPD_Output)) Locals.Add(Into, Out);
 
 			UEdGraphPin* Takes = Sets->FindPin(*Named, EGPD_Input);
 
@@ -3757,7 +3743,26 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 			Node->AllocateDefaultPins();
 
 			/* The Local first, since what it holds is what the value pin learns to take */
-			Connect(Temporary(Name, Held.Has(TEXT("Property")) ? Held.GetObject(TEXT("Property")) : Held), Node->GetVariablePin());
+			UEdGraphPin* Local = Temporary(Name, Held.Has(TEXT("Property")) ? Held.GetObject(TEXT("Property")) : Held);
+
+			/* Told what it is before it is wired. Both pins start as a single wildcard, and a Local
+			 * holding an array is not a single anything: wired as it is, the schema can turn the
+			 * link down and the Assign is left with no variable. Typed to match first, there is
+			 * nothing for it to turn down. */
+			if (Local != nullptr && Node->GetVariablePin() != nullptr && Node->GetValuePin() != nullptr) {
+				FEdGraphPinType Holds = Local->PinType;
+				Holds.bIsReference = false;
+				Holds.bIsConst = false;
+
+				Node->GetVariablePin()->PinType = Holds;
+				Node->GetValuePin()->PinType = Holds;
+			}
+
+			Connect(Local, Node->GetVariablePin());
+
+			if (Local != nullptr && Node->GetVariablePin() != nullptr && Node->GetVariablePin()->LinkedTo.Num() == 0) {
+				UE_LOG(LogReflectionBytecode, Warning, TEXT("the Assign onto \"%s\" could not be wired to its Local"), *Name);
+			}
 
 			Give(Expression, Node->GetValuePin());
 
