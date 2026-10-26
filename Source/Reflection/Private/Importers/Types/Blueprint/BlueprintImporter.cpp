@@ -950,7 +950,26 @@ void IBlueprintImporter::ConstructWidgetTree() {
 
 	WidgetBlueprint->WidgetTree->PostLoad();
 
+	/* The guid each animation was known by, kept for when it comes back.
+	 *
+	 * An animation is a variable of the widget, and the widget remembers every variable by name in a
+	 * map of guids. Taking the animations away leaves their names in that map, and the widget is
+	 * compiled again (marked as changed, below) before they are put back: the compiler meets names
+	 * with nothing behind them and stops on an ensure for each, saying a variable was deleted. They
+	 * come out of the map with the animations and go back in with the same guid when they return. */
+	TMap<FName, FGuid> AnimationGuids;
+
 	for (UWidgetAnimation* WidgetAnimation : WidgetBlueprint->Animations) {
+		if (WidgetAnimation == nullptr) continue;
+
+#if ENGINE_UE5
+		if (const FGuid* Known = WidgetBlueprint->WidgetVariableNameToGuidMap.Find(WidgetAnimation->GetFName())) {
+			AnimationGuids.Add(WidgetAnimation->GetFName(), *Known);
+		}
+
+		WidgetBlueprint->WidgetVariableNameToGuidMap.Remove(WidgetAnimation->GetFName());
+#endif
+
 		MoveToTransientPackageAndRename(WidgetAnimation);
 	}
 
@@ -982,7 +1001,7 @@ void IBlueprintImporter::ConstructWidgetTree() {
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBlueprint);
 
-	GetContainer()->ExportsLoop(GetAssetDataAsValue().GetArray("Animations"), [this, WidgetBlueprint](FUObjectExport* DirectExport) {
+	GetContainer()->ExportsLoop(GetAssetDataAsValue().GetArray("Animations"), [this, WidgetBlueprint, &AnimationGuids](FUObjectExport* DirectExport) {
 		if (UObject* Object = GetObjectSerializer()->SpawnExport(DirectExport)) {
 			UWidgetAnimation* WidgetAnimation = Cast<UWidgetAnimation>(Object);
 
@@ -1006,7 +1025,9 @@ void IBlueprintImporter::ConstructWidgetTree() {
 			 * known by a guid. The editor hands one out as the animation is added; added here, nothing does,
 			 * and each compile stops on an ensure saying so. */
 			if (!WidgetBlueprint->WidgetVariableNameToGuidMap.Contains(WidgetAnimation->GetFName())) {
-				WidgetBlueprint->WidgetVariableNameToGuidMap.Add(WidgetAnimation->GetFName(), FGuid::NewGuid());
+				const FGuid* Before = AnimationGuids.Find(WidgetAnimation->GetFName());
+
+				WidgetBlueprint->WidgetVariableNameToGuidMap.Add(WidgetAnimation->GetFName(), Before != nullptr ? *Before : FGuid::NewGuid());
 			}
 #endif
 
